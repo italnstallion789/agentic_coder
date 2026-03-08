@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,28 @@ from agentic_coder.policy.loader import PolicyLoader, resolve_policy_path
 from agentic_coder.queue.redis_queue import RedisTaskQueue
 
 configure_logging()
-app = FastAPI(title="Agentic Coder API", version="0.1.0")
+
+
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
+    settings = get_settings()
+    if not settings.github_startup_self_check:
+        app_instance.state.startup_self_check = SelfCheckResponse(
+            ok=True,
+            checked_at=datetime.now(UTC).isoformat(),
+            checks={"skipped": True, "reason": "github_startup_self_check=false"},
+        )
+        yield
+        return
+
+    result = await run_github_self_check()
+    app_instance.state.startup_self_check = result
+    if settings.github_startup_self_check_fail_fast and not result.ok:
+        raise RuntimeError("GitHub startup self-check failed")
+    yield
+
+
+app = FastAPI(title="Agentic Coder API", version="0.1.0", lifespan=lifespan)
 
 
 class CreatePullRequestRequest(BaseModel):
@@ -131,23 +153,6 @@ async def run_github_self_check() -> SelfCheckResponse:
         checked_at=datetime.now(UTC).isoformat(),
         checks=checks,
     )
-
-
-@app.on_event("startup")
-async def startup_self_check() -> None:
-    settings = get_settings()
-    if not settings.github_startup_self_check:
-        app.state.startup_self_check = SelfCheckResponse(
-            ok=True,
-            checked_at=datetime.now(UTC).isoformat(),
-            checks={"skipped": True, "reason": "github_startup_self_check=false"},
-        )
-        return
-
-    result = await run_github_self_check()
-    app.state.startup_self_check = result
-    if settings.github_startup_self_check_fail_fast and not result.ok:
-        raise RuntimeError("GitHub startup self-check failed")
 
 
 @app.get("/health")

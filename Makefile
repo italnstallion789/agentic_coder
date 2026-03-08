@@ -1,6 +1,6 @@
 COMPOSE ?= docker compose
 
-.PHONY: up down logs ps migrate test lint format shell api worker executor
+.PHONY: up down logs ps migrate bootstrap test lint format shell api worker executor
 
 up:
 	$(COMPOSE) up --build -d
@@ -16,6 +16,11 @@ ps:
 
 migrate:
 	$(COMPOSE) run --rm api python -m alembic upgrade head
+
+bootstrap:
+	$(COMPOSE) up --build -d
+	$(COMPOSE) run --rm api python -m alembic upgrade head
+	$(COMPOSE) run --rm api python -c "import asyncio, json; from agentic_coder.api.main import run_github_self_check; print(json.dumps(asyncio.run(run_github_self_check()).model_dump(), indent=2))"
 
 test:
 	$(COMPOSE) run --rm api pytest

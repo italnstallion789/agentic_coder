@@ -42,6 +42,7 @@ Quick commands (default path):
 - `make down` stop local stack
 - `make logs` stream service logs
 - `make migrate` run alembic migrations
+- `make bootstrap` start stack + migrate + run startup self-check
 - `make test` run pytest in container
 - `make lint` run ruff in container
 - `make shell` open shell in api container
@@ -53,9 +54,8 @@ Notes:
 
 ### Initial bootstrap
 
-1. `make up`
-2. `make migrate`
-3. `make test`
+1. `make bootstrap`
+2. `make test`
 
 Webhook task ingestion now persists tasks in PostgreSQL and enqueues task IDs in Redis for worker processing.
 
