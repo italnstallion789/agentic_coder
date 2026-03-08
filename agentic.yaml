@@ -1,0 +1,60 @@
+version: 1
+system:
+  name: agentic-coder
+  environment: development
+  control_repository: null
+  allow_any_target_repository: false
+  allowed_target_repositories:
+    - predictiv
+autonomy:
+  mode: gated
+  allowed_actions:
+    - plan
+    - retrieve_context
+    - build_knowledge_graph
+    - write_patch
+    - run_tests
+    - create_pr
+  approval_required_actions:
+    - execute_shell
+    - merge_pr
+    - enable_network
+sandbox:
+  profile: compose
+  network_enabled: false
+  network_allowlist: []
+  max_runtime_seconds: 900
+  max_cpu_cores: 2
+  max_memory_mb: 2048
+models:
+  primary_provider: auto
+  fallback_provider: ollama
+  embedding_provider: github
+knowledge_graph:
+  enabled: true
+  storage: postgres
+  node_types:
+    - repo
+    - commit
+    - file
+    - symbol
+    - test
+    - issue
+    - pr
+    - task
+    - artifact
+    - decision
+  edge_types:
+    - contains
+    - imports
+    - defines
+    - references
+    - calls
+    - changes
+    - mentions
+    - derived_from
+    - related_to
+budgets:
+  max_prompt_tokens: 32000
+  max_completion_tokens: 8000
+  max_parallel_candidates: 1

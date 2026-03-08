@@ -1,0 +1,74 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    command: ["uvicorn", "agentic_coder.api.main:app", "--host", "0.0.0.0", "--port", "8080"]
+    environment:
+      PYTHONPATH: /app/src
+      APP_ENV: development
+      DATABASE_URL: postgresql+psycopg://agentic_coder:agentic_coder@postgres:5432/agentic_coder
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/app
+    depends_on:
+      - postgres
+      - redis
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    command: ["python", "-m", "agentic_coder.worker"]
+    environment:
+      PYTHONPATH: /app/src
+      APP_ENV: development
+      DATABASE_URL: postgresql+psycopg://agentic_coder:agentic_coder@postgres:5432/agentic_coder
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - .:/app
+    depends_on:
+      - postgres
+      - redis
+
+  executor:
+    build:
+      context: .
+      dockerfile: docker/executor.Dockerfile
+    command: ["python", "-m", "agentic_coder.executor_app"]
+    environment:
+      PYTHONPATH: /app/src
+      APP_ENV: development
+      DATABASE_URL: postgresql+psycopg://agentic_coder:agentic_coder@postgres:5432/agentic_coder
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - .:/app
+    depends_on:
+      - postgres
+      - redis
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: agentic_coder
+      POSTGRES_USER: agentic_coder
+      POSTGRES_PASSWORD: agentic_coder
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  postgres_data:
+  ollama_data:

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentic-coder"
+version = "0.1.0"
+description = "Local-first autonomous AI development platform"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.34.0",
+  "pydantic>=2.10.0",
+  "pydantic-settings>=2.8.0",
+  "PyYAML>=6.0.2",
+  "PyJWT>=2.10.1",
+  "httpx>=0.28.1",
+  "structlog>=25.1.0",
+  "SQLAlchemy>=2.0.39",
+  "alembic>=1.15.2",
+  "psycopg[binary]>=3.2.6",
+  "redis>=5.2.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.5",
+  "pytest-asyncio>=0.25.3",
+  "ruff>=0.11.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentic_coder"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
