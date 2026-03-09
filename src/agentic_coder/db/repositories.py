@@ -4,7 +4,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from agentic_coder.db.models import RunEventORM, RunORM, TaskORM, TaskTransitionORM
+from agentic_coder.db.models import PollCursorORM, RunEventORM, RunORM, TaskORM, TaskTransitionORM
 from agentic_coder.domain.tasks import TaskRecord, TaskState
 
 
@@ -206,6 +206,24 @@ class TaskRepository:
             }
             for transition in transitions
         ]
+
+    def get_poll_cursor(self, cursor_key: str) -> dict[str, object] | None:
+        stmt = select(PollCursorORM).where(PollCursorORM.cursor_key == cursor_key)
+        cursor = self.session.scalar(stmt)
+        if cursor is None:
+            return None
+        return cursor.cursor_json
+
+    def upsert_poll_cursor(self, cursor_key: str, cursor_json: dict[str, object]) -> None:
+        stmt = select(PollCursorORM).where(PollCursorORM.cursor_key == cursor_key)
+        cursor = self.session.scalar(stmt)
+        if cursor is None:
+            cursor = PollCursorORM(cursor_key=cursor_key, cursor_json=cursor_json)
+        else:
+            cursor.cursor_json = cursor_json
+            cursor.updated_at = datetime.now(UTC)
+        self.session.add(cursor)
+        self.session.commit()
 
     @staticmethod
     def _to_record(task: TaskORM) -> TaskRecord:

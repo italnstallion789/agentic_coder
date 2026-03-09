@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 from agentic_coder.agents.coder import PatchProposal
 from agentic_coder.agents.planner import PlanResult
@@ -8,7 +9,7 @@ from agentic_coder.agents.reviewer import ReviewResult
 from agentic_coder.agents.security import SecurityResult
 from agentic_coder.agents.tester import ExecutionTestPlan
 from agentic_coder.domain.tasks import TaskRecord, TaskState
-from agentic_coder.worker import process_task
+from agentic_coder.worker import process_task, resolve_workspace_root
 
 
 @dataclass(slots=True)
@@ -89,7 +90,7 @@ def test_process_task_gated_mode_transitions_to_awaiting_approval() -> None:
         "task-1",
         title="Implement cache",
         autonomy_mode="gated",
-        pipeline=_PipelineStub(),
+        workspace_root=Path.cwd(),
     )
 
     assert run_id == "run-1"
@@ -97,3 +98,12 @@ def test_process_task_gated_mode_transitions_to_awaiting_approval() -> None:
     assert repo.task.state == TaskState.AWAITING_APPROVAL
     assert "plan_created" in repo.events
     assert repo.metadata["review_approved"] is True
+
+
+def test_resolve_workspace_root_by_repo_name() -> None:
+    class _Policy:
+        class system:  # noqa: N801
+            local_repository_paths = {"predictiv": "/tmp"}
+
+    resolved = resolve_workspace_root(_Policy(), "acme/predictiv")
+    assert str(resolved) == "/tmp"

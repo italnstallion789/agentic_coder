@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     github_app_id: str = ""
     github_webhook_secret: str = "development-secret"
     github_private_key: str = ""
+    github_private_key_path: Path | None = None
     github_api_base_url: str = "https://api.github.com"
     github_startup_self_check: bool = True
     github_startup_self_check_fail_fast: bool = False
@@ -27,6 +28,25 @@ class Settings(BaseSettings):
         extra="ignore",
         populate_by_name=True,
     )
+
+    @model_validator(mode="after")
+    def load_private_key_from_path(self) -> "Settings":
+        if self.github_private_key:
+            return self
+        if self.github_private_key_path is None:
+            return self
+
+        path_value = str(self.github_private_key_path).strip()
+        if path_value in {"", "."}:
+            return self
+
+        key_path = Path(path_value)
+        if not key_path.is_absolute():
+            key_path = Path.cwd() / key_path
+        if not key_path.exists() or not key_path.is_file():
+            return self
+        self.github_private_key = key_path.read_text(encoding="utf-8")
+        return self
 
 
 @lru_cache(maxsize=1)

@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 AutonomyMode = Literal["gated", "autonomous"]
+TriggerMode = Literal["webhook", "polling", "hybrid"]
 
 
 class SystemPolicy(BaseModel):
@@ -11,6 +12,7 @@ class SystemPolicy(BaseModel):
     control_repository: str | None = None
     allow_any_target_repository: bool = False
     allowed_target_repositories: list[str] = Field(default_factory=list)
+    local_repository_paths: dict[str, str] = Field(default_factory=dict)
 
 
 class AutonomyPolicy(BaseModel):
@@ -41,6 +43,12 @@ class KnowledgeGraphPolicy(BaseModel):
     edge_types: list[str] = Field(default_factory=list)
 
 
+class TriggerPolicy(BaseModel):
+    mode: TriggerMode = "polling"
+    poll_interval_seconds: int = 60
+    max_items_per_poll: int = 50
+
+
 class BudgetPolicy(BaseModel):
     max_prompt_tokens: int = 32000
     max_completion_tokens: int = 8000
@@ -53,6 +61,7 @@ class AgenticPolicy(BaseModel):
     autonomy: AutonomyPolicy = Field(default_factory=AutonomyPolicy)
     sandbox: SandboxPolicy = Field(default_factory=SandboxPolicy)
     models: ModelPolicy = Field(default_factory=ModelPolicy)
+    trigger: TriggerPolicy = Field(default_factory=TriggerPolicy)
     knowledge_graph: KnowledgeGraphPolicy = Field(default_factory=KnowledgeGraphPolicy)
     budgets: BudgetPolicy = Field(default_factory=BudgetPolicy)
 
@@ -62,6 +71,10 @@ class AgenticPolicy(BaseModel):
             raise ValueError("gated autonomy requires at least one approval-required action")
         if self.budgets.max_parallel_candidates < 1:
             raise ValueError("max_parallel_candidates must be at least 1")
+        if self.trigger.poll_interval_seconds < 5:
+            raise ValueError("poll_interval_seconds must be >= 5")
+        if self.trigger.max_items_per_poll < 1:
+            raise ValueError("max_items_per_poll must be >= 1")
         if (
             not self.system.allow_any_target_repository
             and not self.system.allowed_target_repositories

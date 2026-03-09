@@ -11,3 +11,4 @@ htmlcov/
 .vscode/
 .idea/
 .DS_Store
+*.pem

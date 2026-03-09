@@ -82,6 +82,36 @@ This agent can run from a dedicated control repository and execute development w
 
 For production, keep `allow_any_target_repository: false` and explicitly list allowed targets.
 
+### Polling mode (private-by-default)
+
+The default trigger mode is polling, which means no public webhook endpoint is required.
+
+Design summary:
+
+- worker polls GitHub issue comments from `system.control_repository`
+- comments are converted into normalized tasks only when command syntax is present (`@agent`, `repo=...`, `/repo ...`)
+- target repos are constrained by `system.allowed_target_repositories`
+- polling cursor and poll-cycle metrics are durably stored in PostgreSQL (`poll_cursors`)
+
+- Trigger config in [agentic.yaml](agentic.yaml):
+	- `trigger.mode: polling|webhook|hybrid`
+	- `trigger.poll_interval_seconds`
+	- `trigger.max_items_per_poll`
+- Poll source repo:
+	- `system.control_repository`
+
+Polling currently ingests issue comments from the control repository and creates tasks for comments that include agent commands (`@agent`, `repo=...`, or `/repo ...`).
+
+Polling observability endpoint:
+
+- `GET /polling/status`
+	- returns configured trigger mode/interval/max-items
+	- returns current cursor key and last poll metadata (`last_polled_at`, `last_seen_count`, `last_enqueued_count`, `since`, `last_comment_id`)
+
+Example:
+
+- `curl http://localhost:8080/polling/status`
+
 ### Where to configure model + repo targeting
 
 Primary configuration is in [agentic.yaml](agentic.yaml):
@@ -116,21 +146,31 @@ Set fail-fast to `true` when deploying production workers that should not run wi
 ### GitHub integration setup checklist
 
 1. Create a GitHub App in your org/user settings.
-2. Set permissions:
+2. Fill the required URL fields in GitHub App settings:
+	- Homepage URL: any valid URL you control (for local dev you can use your GitHub profile/repo URL)
+	- Webhook URL: public URL to this service endpoint `/github/webhook`
+	  - local dev requires a tunnel (for example `https://<subdomain>.ngrok.app/github/webhook`)
+	- Callback URL: only needed if you enable user-to-server OAuth flow; otherwise leave unset
+3. Set permissions:
 	- Metadata: Read
 	- Contents: Read & Write
 	- Pull requests: Read & Write
 	- Issues: Read
-3. Enable webhook and set webhook URL to your API `/github/webhook` endpoint.
-4. Copy values into runtime env:
+4. Enable webhook and set webhook secret.
+5. Copy values into runtime env:
 	- `GITHUB_APP_ID`
-	- `GITHUB_PRIVATE_KEY`
 	- `GITHUB_WEBHOOK_SECRET`
-5. Install the app on:
+	- choose one private key option:
+	  - `GITHUB_PRIVATE_KEY` (inline PEM value)
+	  - `GITHUB_PRIVATE_KEY_PATH` (path to PEM file mounted in container)
+6. Install the app on:
 	- your control repo
 	- `predictiv`
-6. Verify with:
+7. Verify with:
 	- `GET /startup/self-check`
+	- `GET /polling/status`
+
+If you run polling mode only, webhook delivery is optional. You can still set `GITHUB_WEBHOOK_SECRET` now and switch to `trigger.mode: webhook` or `hybrid` later.
 
 If `make` is unavailable, use direct Compose commands:
 

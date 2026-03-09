@@ -188,6 +188,31 @@ def get_policy() -> dict[str, object]:
     return {"path": str(path), "policy": policy.model_dump()}
 
 
+@app.get("/polling/status")
+def get_polling_status() -> dict[str, object]:
+    _, policy = load_policy()
+    control_repository = policy.system.control_repository
+    cursor_key = (
+        f"github_poll:issue_comments:{control_repository}" if control_repository else None
+    )
+
+    cursor: dict[str, object] | None = None
+    if cursor_key:
+        session_factory = create_session_factory()
+        with session_factory() as session:
+            repo = TaskRepository(session)
+            cursor = repo.get_poll_cursor(cursor_key)
+
+    return {
+        "mode": policy.trigger.mode,
+        "poll_interval_seconds": policy.trigger.poll_interval_seconds,
+        "max_items_per_poll": policy.trigger.max_items_per_poll,
+        "control_repository": control_repository,
+        "cursor_key": cursor_key,
+        "cursor": cursor,
+    }
+
+
 @app.get("/task-states")
 def get_task_states() -> dict[str, list[str]]:
     return {"states": [state.value for state in TaskState]}

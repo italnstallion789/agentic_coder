@@ -100,3 +100,15 @@ class RunEventORM(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
+
+
+class PollCursorORM(Base):
+    __tablename__ = "poll_cursors"
+    __table_args__ = (Index("ix_poll_cursors_updated_at", "updated_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    cursor_key: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    cursor_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )

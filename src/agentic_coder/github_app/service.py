@@ -3,6 +3,7 @@ import hmac
 import re
 import time
 from base64 import b64encode
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -67,6 +68,69 @@ class GitHubAppService:
             sender=sender,
             raw_event=payload,
         )
+
+    def normalize_polled_issue_comment(
+        self,
+        source_repository: str,
+        installation_id: int,
+        comment: dict[str, Any],
+    ) -> NormalizedGithubTask:
+        body = str(comment.get("body") or "")
+        target_hint = self.extract_target_repository(body)
+        target_repository = self.resolve_target_repository(source_repository, target_hint)
+        sender = ((comment.get("user") or {}).get("login")) or "unknown"
+
+        issue_url = str(comment.get("issue_url") or "")
+        issue_number: int | None = None
+        if issue_url.rsplit("/", maxsplit=1)[-1].isdigit():
+            issue_number = int(issue_url.rsplit("/", maxsplit=1)[-1])
+
+        title = f"Issue comment from {sender}"
+        if issue_number is not None:
+            title = f"Issue #{issue_number} comment from {sender}"
+
+        return NormalizedGithubTask(
+            event_name="issue_comment",
+            source_repository=source_repository,
+            target_repository=target_repository,
+            installation_id=installation_id,
+            title=title,
+            body=body,
+            issue_number=issue_number,
+            sender=sender,
+            raw_event={"polling": True, "comment": comment},
+        )
+
+    async def list_issue_comments_since(
+        self,
+        repository: str,
+        installation_token: str,
+        *,
+        since: str | None,
+        per_page: int = 50,
+    ) -> list[dict[str, Any]]:
+        url = f"{self.api_base_url}/repos/{repository}/issues/comments"
+        headers = self._installation_headers(installation_token)
+        params: dict[str, Any] = {
+            "sort": "updated",
+            "direction": "asc",
+            "per_page": per_page,
+        }
+        if since:
+            params["since"] = since
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+        response.raise_for_status()
+
+        comments: list[dict[str, Any]] = response.json()
+        comments.sort(
+            key=lambda item: (
+                str(item.get("updated_at") or datetime.now(UTC).isoformat()),
+                int(item.get("id") or 0),
+            )
+        )
+        return comments
 
     @staticmethod
     def extract_target_repository(comment_body: str) -> str | None:

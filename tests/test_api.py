@@ -159,6 +159,18 @@ class _TimelineRepo:
             }
         ]
 
+    def get_poll_cursor(self, cursor_key: str) -> dict[str, object] | None:
+        if cursor_key != "github_poll:issue_comments:italnstallion789/agentic_coder":
+            return None
+        return {
+            "since": "2026-03-08T00:10:00Z",
+            "last_comment_id": 321,
+            "control_repository": "italnstallion789/agentic_coder",
+            "last_polled_at": "2026-03-08T00:11:00+00:00",
+            "last_seen_count": 5,
+            "last_enqueued_count": 2,
+        }
+
 
 def test_task_timeline_endpoint(monkeypatch) -> None:
     from agentic_coder.api import main
@@ -312,3 +324,19 @@ def test_rerun_startup_self_check_endpoint(monkeypatch) -> None:
     data = response.json()
     assert data["ok"] is True
     assert data["checks"]["repositories"][0]["repository"] == "acme/predictiv"
+
+
+def test_polling_status_endpoint(monkeypatch) -> None:
+    from agentic_coder.api import main
+
+    monkeypatch.setattr(main, "TaskRepository", _TimelineRepo)
+    monkeypatch.setattr(main, "create_session_factory", lambda: _FakeSessionFactory())
+
+    response = client.get("/polling/status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["mode"] == "polling"
+    assert data["control_repository"] == "italnstallion789/agentic_coder"
+    assert data["cursor"]["last_seen_count"] == 5
+    assert data["cursor"]["last_enqueued_count"] == 2
