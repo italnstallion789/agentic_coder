@@ -2,6 +2,21 @@ from pathlib import Path
 
 from agentic_coder.retrieval.service import InMemoryRetriever, RetrievalDocument
 
+IGNORED_PATH_PARTS = {
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+}
+
+
+def _is_ignored_path(path: Path) -> bool:
+    return any(part in IGNORED_PATH_PARTS for part in path.parts)
+
 
 class ContextRetrievalAgent:
     def __init__(self, retriever: InMemoryRetriever) -> None:
@@ -10,7 +25,7 @@ class ContextRetrievalAgent:
     def index_workspace(self, workspace_root: Path) -> int:
         indexed = 0
         for file_path in workspace_root.rglob("*.py"):
-            if "/." in str(file_path):
+            if _is_ignored_path(file_path):
                 continue
             try:
                 text = file_path.read_text(encoding="utf-8")

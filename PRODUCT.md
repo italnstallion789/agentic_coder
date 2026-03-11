@@ -395,6 +395,7 @@ All incoming webhooks are validated with HMAC-SHA256 using `GITHUB_WEBHOOK_SECRE
 | Variable | Default | Description |
 |---|---|---|
 | `APP_ENV` | `development` | Environment name |
+| `API_ADMIN_TOKEN` | — | Optional admin token for privileged API routes |
 | `GITHUB_APP_ID` | — | GitHub App numeric ID |
 | `GITHUB_WEBHOOK_SECRET` | — | HMAC secret for webhook verification |
 | `GITHUB_PRIVATE_KEY` | — | PEM private key (inline) |

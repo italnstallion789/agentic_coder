@@ -8,6 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "agentic-coder"
     environment: str = Field(default="development", alias="APP_ENV")
+    api_admin_token: str = ""
     host: str = "0.0.0.0"
     port: int = 8080
     github_app_id: str = ""

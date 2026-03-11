@@ -6,11 +6,13 @@ from sqlalchemy.orm import Session
 
 from agentic_coder.db.models import PollCursorORM, RunEventORM, RunORM, TaskORM, TaskTransitionORM
 from agentic_coder.domain.tasks import TaskRecord, TaskState
+from agentic_coder.orchestration.state_machine import InvalidTaskTransitionError, TaskStateMachine
 
 
 class TaskRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
+        self._state_machine = TaskStateMachine()
 
     def create(self, title: str, payload: dict[str, object]) -> TaskRecord:
         task = TaskORM(
@@ -60,7 +62,23 @@ class TaskRepository:
         task = self.session.scalar(stmt)
         if task is None:
             return None
-        from_state = task.state
+        from_state = TaskState(task.state)
+        if from_state != state:
+            transition_probe = TaskRecord(
+                task_id=task.task_id,
+                title=task.title,
+                payload=task.payload,
+                state=from_state,
+                created_at=task.created_at,
+                updated_at=task.updated_at,
+            )
+            try:
+                self._state_machine.transition(transition_probe, state)
+            except InvalidTaskTransitionError as exc:
+                raise InvalidTaskTransitionError(
+                    f"Invalid transition for task {task_id}: {from_state.value} -> {state.value}"
+                ) from exc
+
         task.state = state.value
         task.updated_at = datetime.now(UTC)
         self.session.add(task)
@@ -69,7 +87,7 @@ class TaskRepository:
                 transition_id=str(uuid4()),
                 task_id=task.task_id,
                 run_id=run_id,
-                from_state=from_state,
+                from_state=from_state.value,
                 to_state=state.value,
                 reason=reason,
                 details=details or {},

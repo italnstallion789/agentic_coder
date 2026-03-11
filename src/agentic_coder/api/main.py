@@ -1,11 +1,13 @@
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from sqlalchemy import text
 
 from agentic_coder.config import get_settings
 from agentic_coder.db.repositories import TaskRepository
@@ -31,11 +33,36 @@ async def lifespan(app_instance: FastAPI):
         yield
         return
 
-    result = await run_github_self_check()
-    app_instance.state.startup_self_check = result
-    if settings.github_startup_self_check_fail_fast and not result.ok:
-        raise RuntimeError("GitHub startup self-check failed")
-    yield
+    if settings.github_startup_self_check_fail_fast:
+        result = await run_github_self_check()
+        app_instance.state.startup_self_check = result
+        if not result.ok:
+            raise RuntimeError("GitHub startup self-check failed")
+        yield
+        return
+
+    app_instance.state.startup_self_check = SelfCheckResponse(
+        ok=False,
+        checked_at=datetime.now(UTC).isoformat(),
+        checks={"pending": True, "reason": "startup self-check running in background"},
+    )
+
+    async def _background_self_check() -> None:
+        try:
+            app_instance.state.startup_self_check = await run_github_self_check()
+        except Exception as exc:  # pragma: no cover - defensive background branch
+            app_instance.state.startup_self_check = SelfCheckResponse(
+                ok=False,
+                checked_at=datetime.now(UTC).isoformat(),
+                checks={"pending": False, "error": str(exc)},
+            )
+
+    task = asyncio.create_task(_background_self_check())
+    try:
+        yield
+    finally:
+        if not task.done():
+            task.cancel()
 
 
 app = FastAPI(title="Agentic Coder API", version="0.1.0", lifespan=lifespan)
@@ -45,6 +72,12 @@ class CreatePullRequestRequest(BaseModel):
     installation_id: int
     branch_name: str
     draft: bool = True
+
+
+class CreateTaskRequest(BaseModel):
+    title: str
+    payload: dict[str, object] = Field(default_factory=dict)
+    enqueue: bool = True
 
 
 class TaskDecisionRequest(BaseModel):
@@ -59,6 +92,26 @@ class SelfCheckResponse(BaseModel):
     ok: bool
     checked_at: str
     checks: dict[str, Any]
+
+
+def require_admin_token(
+    x_admin_token: str | None = Header(default=None),
+) -> None:
+    settings = get_settings()
+    if settings.api_admin_token and x_admin_token != settings.api_admin_token:
+        raise HTTPException(status_code=401, detail="Invalid admin token")
+
+
+def should_accept_body_as_command(body: str) -> bool:
+    lowered = body.lower()
+    return (
+        "@agent" in lowered
+        or lowered.strip().startswith("/repo")
+        or "repo=" in lowered
+        or "/approve" in lowered
+        or "/approval" in lowered
+        or "/reject" in lowered
+    )
 
 
 def _extract_pull_request(events: list[dict[str, object]]) -> dict[str, object] | None:
@@ -272,12 +325,51 @@ def health() -> dict[str, str]:
     }
 
 
+@app.get("/healthz")
+def healthz() -> dict[str, str]:
+    return health()
+
+
+@app.get("/readyz")
+def readiness() -> dict[str, object]:
+    checks: dict[str, bool] = {"database": False, "redis": False}
+    errors: dict[str, str] = {}
+
+    session_factory = create_session_factory()
+    try:
+        with session_factory() as session:
+            session.execute(text("SELECT 1"))
+        checks["database"] = True
+    except Exception as exc:  # pragma: no cover - environment dependent branch
+        errors["database"] = str(exc)
+
+    try:
+        queue = RedisTaskQueue.from_settings()
+        queue.client.ping()
+        checks["redis"] = True
+    except Exception as exc:  # pragma: no cover - environment dependent branch
+        errors["redis"] = str(exc)
+
+    ready = all(checks.values())
+    response = {"status": "ready" if ready else "not_ready", "checks": checks}
+    if errors:
+        response["errors"] = errors
+    if not ready:
+        raise HTTPException(status_code=503, detail=response)
+    return response
+
+
 @app.get("/startup/self-check")
 def get_startup_self_check() -> dict[str, object]:
     result = getattr(app.state, "startup_self_check", None)
     if result is None:
         raise HTTPException(status_code=503, detail="Self-check not available yet")
     return result.model_dump()
+
+
+@app.get("/self-check")
+def get_self_check_alias() -> dict[str, object]:
+    return get_startup_self_check()
 
 
 @app.post("/startup/self-check/run")
@@ -323,6 +415,36 @@ def get_task_states() -> dict[str, list[str]]:
     return {"states": [state.value for state in TaskState]}
 
 
+@app.post("/tasks")
+def create_task(
+    request_body: CreateTaskRequest,
+    _admin: None = Depends(require_admin_token),
+) -> dict[str, object]:
+    payload = dict(request_body.payload)
+    payload.setdefault("title", request_body.title)
+
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        task = repo.create(title=request_body.title, payload=payload)
+
+    queue_error: str | None = None
+    if request_body.enqueue:
+        try:
+            queue = RedisTaskQueue.from_settings()
+            queue.enqueue(task.task_id)
+        except Exception as exc:  # pragma: no cover - non-critical runtime path
+            queue_error = str(exc)
+
+    return {
+        "ok": True,
+        "task_id": task.task_id,
+        "state": task.state.value,
+        "queued": request_body.enqueue and queue_error is None,
+        "queue_error": queue_error,
+    }
+
+
 @app.get("/tasks")
 def list_tasks(limit: int = 20) -> dict[str, list[dict[str, object]]]:
     session_factory = create_session_factory()
@@ -341,6 +463,38 @@ def list_tasks(limit: int = 20) -> dict[str, list[dict[str, object]]]:
             }
             for task in tasks
         ]
+    }
+
+
+@app.get("/tasks/{task_id}")
+def get_task(task_id: str) -> dict[str, object]:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        task = repo.get_by_id(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        latest_run = repo.get_latest_run_for_task(task.task_id)
+
+    return {
+        "task": {
+            "task_id": task.task_id,
+            "title": task.title,
+            "payload": task.payload,
+            "state": task.state.value,
+            "created_at": task.created_at.isoformat(),
+            "updated_at": task.updated_at.isoformat(),
+        },
+        "latest_run": (
+            {
+                **latest_run,
+                "started_at": latest_run["started_at"].isoformat(),
+                "ended_at": latest_run["ended_at"].isoformat() if latest_run["ended_at"] else None,
+                "created_at": latest_run["created_at"].isoformat(),
+            }
+            if latest_run is not None
+            else None
+        ),
     }
 
 
@@ -392,7 +546,10 @@ def dashboard_page() -> str:
 
 
 @app.post("/tasks/{task_id}/approve")
-def approve_task(task_id: str) -> dict[str, object]:
+def approve_task(
+    task_id: str,
+    _admin: None = Depends(require_admin_token),
+) -> dict[str, object]:
     session_factory = create_session_factory()
     with session_factory() as session:
         repo = TaskRepository(session)
@@ -408,7 +565,11 @@ def approve_task(task_id: str) -> dict[str, object]:
 
 
 @app.post("/tasks/{task_id}/reject")
-def reject_task(task_id: str, request_body: TaskDecisionRequest) -> dict[str, object]:
+def reject_task(
+    task_id: str,
+    request_body: TaskDecisionRequest,
+    _admin: None = Depends(require_admin_token),
+) -> dict[str, object]:
     session_factory = create_session_factory()
     with session_factory() as session:
         repo = TaskRepository(session)
@@ -429,7 +590,10 @@ def reject_task(task_id: str, request_body: TaskDecisionRequest) -> dict[str, ob
 
 
 @app.delete("/tasks/{task_id}")
-def delete_task(task_id: str) -> dict[str, object]:
+def delete_task(
+    task_id: str,
+    _admin: None = Depends(require_admin_token),
+) -> dict[str, object]:
     session_factory = create_session_factory()
     with session_factory() as session:
         repo = TaskRepository(session)
@@ -440,7 +604,10 @@ def delete_task(task_id: str) -> dict[str, object]:
 
 
 @app.post("/admin/requests/reset")
-def reset_requests(request_body: ResetRequestsRequest) -> dict[str, object]:
+def reset_requests(
+    request_body: ResetRequestsRequest,
+    _admin: None = Depends(require_admin_token),
+) -> dict[str, object]:
     session_factory = create_session_factory()
     with session_factory() as session:
         repo = TaskRepository(session)
@@ -509,7 +676,30 @@ def get_run(run_id: str, limit: int = 200) -> dict[str, object]:
     }
 
 
+@app.get("/runs/{run_id}/events")
+def get_run_events(run_id: str, limit: int = 500) -> dict[str, object]:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        run = repo.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        events = repo.list_run_events(run_id=run_id, limit=limit)
+
+    return {
+        "run_id": run_id,
+        "events": [
+            {
+                **event,
+                "created_at": event["created_at"].isoformat(),
+            }
+            for event in events
+        ],
+    }
+
+
 @app.post("/github/webhook")
+@app.post("/webhook")
 async def github_webhook(
     request: Request,
     x_github_event: str = Header(default="unknown"),
@@ -527,6 +717,17 @@ async def github_webhook(
 
     github = GitHubAppService(settings.github_app_id, settings.github_private_key)
     normalized = github.normalize_issue_comment_event(x_github_event, payload)
+    if not should_accept_body_as_command(normalized.body):
+        return {
+            "accepted": True,
+            "event": x_github_event,
+            "task_id": None,
+            "queued": False,
+            "queue_error": None,
+            "normalized": None,
+            "ignored": "non_command_comment",
+        }
+
     _, policy = load_policy()
     if not is_target_repository_allowed(policy, normalized.target_repository):
         raise HTTPException(
@@ -580,6 +781,7 @@ async def github_webhook(
 async def create_pull_request_from_run(
     run_id: str,
     request_body: CreatePullRequestRequest,
+    _admin: None = Depends(require_admin_token),
 ) -> dict[str, object]:
     session_factory = create_session_factory()
     with session_factory() as session:
