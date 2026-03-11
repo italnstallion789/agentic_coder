@@ -13,6 +13,8 @@ class SystemPolicy(BaseModel):
     allow_any_target_repository: bool = False
     allowed_target_repositories: list[str] = Field(default_factory=list)
     local_repository_paths: dict[str, str] = Field(default_factory=dict)
+    default_target_base_branch: str = "develop"
+    target_base_branches: dict[str, str] = Field(default_factory=dict)
 
 
 class AutonomyPolicy(BaseModel):

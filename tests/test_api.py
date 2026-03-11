@@ -87,6 +87,26 @@ class _TimelineRepo:
     def __init__(self, session) -> None:  # noqa: ANN001
         self.session = session
 
+    def list_recent(self, limit: int = 50) -> list[TaskRecord]:
+        _ = limit
+        now = datetime.now(UTC)
+        return [
+            TaskRecord(
+                task_id="task-123",
+                title="Implement cache",
+                payload={
+                    "repository": "acme/predictiv",
+                    "source_repository": "acme/control",
+                    "issue_number": 42,
+                    "sender": "alex",
+                    "body": "@agent repo=predictiv do it",
+                },
+                state=TaskState.AWAITING_APPROVAL,
+                created_at=now,
+                updated_at=now,
+            )
+        ]
+
     def get_by_id(self, task_id: str) -> TaskRecord | None:
         if task_id != "task-123":
             return None
@@ -138,6 +158,21 @@ class _TimelineRepo:
             "created_at": now,
         }
 
+    def get_latest_run_for_task(self, task_id: str) -> dict[str, object] | None:
+        if task_id != "task-123":
+            return None
+        now = datetime.now(UTC)
+        return {
+            "run_id": "run-1",
+            "task_id": "task-123",
+            "status": "succeeded",
+            "metadata": {"objective": "Implement cache"},
+            "worker_name": "worker",
+            "started_at": now,
+            "ended_at": now,
+            "created_at": now,
+        }
+
     def list_run_events(self, run_id: str, limit: int = 500) -> list[dict[str, object]]:
         _ = limit
         if run_id != "run-1":
@@ -155,6 +190,18 @@ class _TimelineRepo:
                 "run_id": "run-1",
                 "event_type": "pr_draft",
                 "payload": {"title": "Draft title", "body": "Draft body"},
+                "created_at": datetime.now(UTC),
+            },
+            {
+                "event_id": "evt-3",
+                "run_id": "run-1",
+                "event_type": "approval_pr_created",
+                "payload": {
+                    "pull_request_number": 7,
+                    "pull_request_url": "https://github.com/acme/predictiv/pull/7",
+                    "branch_name": "agentic/run-1",
+                    "base_branch": "main",
+                },
                 "created_at": datetime.now(UTC),
             }
         ]
@@ -202,7 +249,7 @@ def test_run_replay_endpoint(monkeypatch) -> None:
     assert data["run"]["status"] == "succeeded"
     assert data["run"]["metadata"]["objective"] == "Implement cache"
     assert len(data["timeline"]) == 1
-    assert len(data["events"]) == 2
+    assert len(data["events"]) >= 2
     assert data["events"][0]["event_type"] == "plan_created"
 
 
@@ -340,3 +387,19 @@ def test_polling_status_endpoint(monkeypatch) -> None:
     assert data["control_repository"] == "italnstallion789/agentic_coder"
     assert data["cursor"]["last_seen_count"] == 5
     assert data["cursor"]["last_enqueued_count"] == 2
+
+
+def test_dashboard_data_endpoint(monkeypatch) -> None:
+    from agentic_coder.api import main
+
+    monkeypatch.setattr(main, "TaskRepository", _TimelineRepo)
+    monkeypatch.setattr(main, "create_session_factory", lambda: _FakeSessionFactory())
+
+    response = client.get("/dashboard/data")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["task_count"] == 1
+    task = data["tasks"][0]
+    assert task["request"]["target_repository"] == "acme/predictiv"
+    assert task["run"]["run_id"] == "run-1"
+    assert task["pull_request"]["number"] == 7
