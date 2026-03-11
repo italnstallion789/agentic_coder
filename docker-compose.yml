@@ -13,6 +13,7 @@ services:
       - "8080:8080"
     volumes:
       - .:/app
+      - /home/alex/Development/predictiv:/repos/predictiv
     depends_on:
       - postgres
       - redis
@@ -29,6 +30,7 @@ services:
       REDIS_URL: redis://redis:6379/0
     volumes:
       - .:/app
+      - /home/alex/Development/predictiv:/repos/predictiv
     depends_on:
       - postgres
       - redis
@@ -45,6 +47,7 @@ services:
       REDIS_URL: redis://redis:6379/0
     volumes:
       - .:/app
+      - /home/alex/Development/predictiv:/repos/predictiv
     depends_on:
       - postgres
       - redis

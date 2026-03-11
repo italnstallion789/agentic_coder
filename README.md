@@ -155,7 +155,7 @@ Set fail-fast to `true` when deploying production workers that should not run wi
 	- Metadata: Read
 	- Contents: Read & Write
 	- Pull requests: Read & Write
-	- Issues: Read
+	- Issues: Read & Write
 4. Enable webhook and set webhook secret.
 5. Copy values into runtime env:
 	- `GITHUB_APP_ID`

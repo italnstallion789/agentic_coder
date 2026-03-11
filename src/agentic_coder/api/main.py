@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from agentic_coder.config import get_settings
@@ -46,10 +47,89 @@ class CreatePullRequestRequest(BaseModel):
     draft: bool = True
 
 
+class TaskDecisionRequest(BaseModel):
+    reason: str | None = None
+
+
+class ResetRequestsRequest(BaseModel):
+    clear_poll_cursors: bool = True
+
+
 class SelfCheckResponse(BaseModel):
     ok: bool
     checked_at: str
     checks: dict[str, Any]
+
+
+def _extract_pull_request(events: list[dict[str, object]]) -> dict[str, object] | None:
+    pr_event = next(
+        (event for event in reversed(events) if event["event_type"] == "approval_pr_created"),
+        None,
+    )
+    if pr_event is None:
+        return None
+    payload = pr_event["payload"]
+    return {
+        "number": payload.get("pull_request_number"),
+        "url": payload.get("pull_request_url"),
+        "branch": payload.get("branch_name"),
+        "base": payload.get("base_branch"),
+        "commit_sha": payload.get("commit_sha"),
+    }
+
+
+def _build_dashboard_task_view(
+    repo: TaskRepository,
+    task: object,
+) -> dict[str, object]:
+    payload = task.payload
+    latest_run = repo.get_latest_run_for_task(task.task_id)
+
+    run_events: list[dict[str, object]] = []
+    run_id: str | None = None
+    run_status: str | None = None
+    if latest_run is not None:
+        run_id = str(latest_run["run_id"])
+        run_status = str(latest_run["status"])
+        run_events = repo.list_run_events(run_id=run_id, limit=500)
+
+    proposal_event = next(
+        (event for event in reversed(run_events) if event["event_type"] == "proposal_generated"),
+        None,
+    )
+    pr_draft_event = next(
+        (event for event in reversed(run_events) if event["event_type"] == "pr_draft"),
+        None,
+    )
+
+    return {
+        "task_id": task.task_id,
+        "title": task.title,
+        "state": task.state.value,
+        "created_at": task.created_at.isoformat(),
+        "updated_at": task.updated_at.isoformat(),
+        "request": {
+            "source_repository": payload.get("source_repository"),
+            "target_repository": payload.get("repository"),
+            "issue_number": payload.get("issue_number"),
+            "sender": payload.get("sender"),
+            "body": payload.get("body"),
+        },
+        "run": {
+            "run_id": run_id,
+            "status": run_status,
+            "worker_name": (latest_run or {}).get("worker_name") if latest_run else None,
+            "proposal_summary": (
+                (proposal_event or {}).get("payload") or {}
+            ).get("summary"),
+            "target_files": (
+                (proposal_event or {}).get("payload") or {}
+            ).get("target_files"),
+            "pr_draft_title": ((pr_draft_event or {}).get("payload") or {}).get("title"),
+            "model_used": ((latest_run or {}).get("metadata") or {}).get("model_used"),
+        },
+        "pull_request": _extract_pull_request(run_events),
+    }
 
 
 def load_policy() -> tuple[Path, object]:
@@ -81,6 +161,16 @@ def expand_target_repository(policy: object, repository: str) -> str:
     return repository
 
 
+def resolve_base_branch_for_repository(policy: object, repository: str) -> str:
+    per_repo = policy.system.target_base_branches
+    if repository in per_repo:
+        return str(per_repo[repository])
+    repo_name = repository.split("/", maxsplit=1)[-1]
+    if repo_name in per_repo:
+        return str(per_repo[repo_name])
+    return str(policy.system.default_target_base_branch)
+
+
 async def run_github_self_check() -> SelfCheckResponse:
     settings = get_settings()
     _, policy = load_policy()
@@ -109,10 +199,25 @@ async def run_github_self_check() -> SelfCheckResponse:
     )
 
     app_info = await github.get_app_info()
+    permissions = app_info.get("permissions") or {}
+    required_permissions = {
+        "metadata": "read",
+        "contents": "write",
+        "pull_requests": "write",
+        "issues": "write",
+    }
+    permission_checks = {
+        key: str(permissions.get(key) or "none") for key in required_permissions
+    }
+    permissions_ok = all(
+        permission_checks[key] == required_permissions[key] for key in required_permissions
+    )
     checks["app"] = {
-        "ok": True,
+        "ok": permissions_ok,
         "slug": app_info.get("slug"),
         "name": app_info.get("name"),
+        "permissions": permission_checks,
+        "required_permissions": required_permissions,
     }
 
     repositories_to_check: list[str] = []
@@ -237,6 +342,110 @@ def list_tasks(limit: int = 20) -> dict[str, list[dict[str, object]]]:
             for task in tasks
         ]
     }
+
+
+@app.get("/dashboard/data")
+def get_dashboard_data(limit: int = 50) -> dict[str, object]:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        tasks = repo.list_recent(limit=limit)
+
+    _, policy = load_policy()
+    polling = get_polling_status()
+    settings = get_settings()
+
+    runtime = "deterministic local pipeline"
+    if policy.models.primary_provider == "auto":
+        if settings.github_models_api_key:
+            runtime = f"github:{settings.github_models_chat_model} (auto)"
+        else:
+            runtime = f"ollama:{settings.ollama_chat_model} (auto fallback)"
+    elif policy.models.primary_provider == "github":
+        runtime = f"github:{settings.github_models_chat_model}"
+    elif policy.models.primary_provider == "ollama":
+        runtime = f"ollama:{settings.ollama_chat_model}"
+
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        task_items = [_build_dashboard_task_view(repo, task) for task in tasks]
+
+    return {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "autonomy_mode": policy.autonomy.mode,
+        "task_count": len(task_items),
+        "polling": polling,
+        "model": {
+            "primary_provider": policy.models.primary_provider,
+            "fallback_provider": policy.models.fallback_provider,
+            "embedding_provider": policy.models.embedding_provider,
+            "runtime": runtime,
+        },
+        "tasks": task_items,
+    }
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard_page() -> str:
+    template_path = Path(__file__).with_name("dashboard.html")
+    return template_path.read_text(encoding="utf-8")
+
+
+@app.post("/tasks/{task_id}/approve")
+def approve_task(task_id: str) -> dict[str, object]:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        task = repo.get_by_id(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        if task.state != TaskState.AWAITING_APPROVAL:
+            raise HTTPException(status_code=400, detail="Task is not awaiting approval")
+        updated = repo.update_state(task_id, TaskState.READY, reason="dashboard_approved")
+        if updated is None:
+            raise HTTPException(status_code=500, detail="Failed to update task state")
+    return {"ok": True, "task_id": task_id, "state": "ready"}
+
+
+@app.post("/tasks/{task_id}/reject")
+def reject_task(task_id: str, request_body: TaskDecisionRequest) -> dict[str, object]:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        task = repo.get_by_id(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        if task.state != TaskState.AWAITING_APPROVAL:
+            raise HTTPException(status_code=400, detail="Task is not awaiting approval")
+        updated = repo.update_state(
+            task_id,
+            TaskState.CANCELLED,
+            reason="dashboard_rejected",
+            details={"reason": request_body.reason},
+        )
+        if updated is None:
+            raise HTTPException(status_code=500, detail="Failed to update task state")
+    return {"ok": True, "task_id": task_id, "state": "cancelled"}
+
+
+@app.delete("/tasks/{task_id}")
+def delete_task(task_id: str) -> dict[str, object]:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        deleted = repo.delete_task(task_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"ok": True, "task_id": task_id, "deleted": True}
+
+
+@app.post("/admin/requests/reset")
+def reset_requests(request_body: ResetRequestsRequest) -> dict[str, object]:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        stats = repo.clear_all_requests(clear_poll_cursors=request_body.clear_poll_cursors)
+    return {"ok": True, **stats}
 
 
 @app.get("/tasks/{task_id}/timeline")
@@ -410,7 +619,7 @@ async def create_pull_request_from_run(
     )
 
     token = await github.create_installation_token(installation_id)
-    base_branch = await github.get_default_branch(repository, token)
+    base_branch = resolve_base_branch_for_repository(policy, repository)
     base_sha = await github.get_branch_head_sha(repository, base_branch, token)
     await github.create_branch(repository, request_body.branch_name, base_sha, token)
 

@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agentic Coder Dashboard</title>
+  <style>
+    :root {
+      --bg: #f6f9f4;
+      --panel: #ffffff;
+      --ink: #1f2c24;
+      --muted: #5f6f65;
+      --accent: #116149;
+      --warn: #8a5a00;
+      --danger: #8b1e3f;
+      --ok: #14532d;
+      --border: #d7e3dc;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: radial-gradient(circle at 10% 0%, #dff0e7 0%, var(--bg) 46%);
+    }
+
+    .wrap {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 20px 16px 28px;
+    }
+
+    .header {
+      display: flex;
+      gap: 12px;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+
+    .title { font-size: 24px; font-weight: 750; margin: 0; }
+    .sub { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
+
+    .btn {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--ink);
+      border-radius: 10px;
+      padding: 8px 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .btn.warn {
+      background: #fff7e5;
+      border-color: #ecd8a7;
+      color: #7b4a00;
+    }
+
+    .btn.danger {
+      background: #ffeef2;
+      border-color: #f6c8d6;
+      color: #8b1e3f;
+    }
+
+    .controls {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+      align-items: center;
+    }
+
+    .controls input,
+    .controls select {
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 7px 9px;
+      background: #fff;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+      box-shadow: 0 6px 20px rgba(17, 97, 73, 0.06);
+    }
+
+    .label { font-size: 12px; text-transform: uppercase; color: var(--muted); }
+    .value { font-size: 18px; margin-top: 4px; font-weight: 700; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+    }
+
+    th, td {
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+      padding: 10px;
+      font-size: 13px;
+    }
+
+    th {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      background: #f1f8f5;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+    .mono { font-family: "IBM Plex Mono", "SFMono-Regular", monospace; }
+    .muted { color: var(--muted); }
+    .pill {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      border: 1px solid var(--border);
+      background: #f4faf7;
+    }
+
+    .state-awaiting_approval {
+      background: #fff8e8;
+      border-color: #f2dfb0;
+      color: var(--warn);
+    }
+
+    .state-succeeded {
+      background: #e9f8ef;
+      border-color: #c7ead3;
+      color: var(--ok);
+    }
+
+    .state-failed,
+    .state-cancelled {
+      background: #ffeef2;
+      border-color: #f6c8d6;
+      color: var(--danger);
+    }
+
+    .actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    a { color: var(--accent); }
+
+    @media (max-width: 980px) {
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      th:nth-child(3), td:nth-child(3) { display: none; }
+    }
+
+    @media (max-width: 640px) {
+      .grid { grid-template-columns: 1fr; }
+      th:nth-child(5), td:nth-child(5) { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <div>
+        <h1 class="title">Agentic Coder Operations Dashboard</h1>
+        <p class="sub">
+          Readable view of requests, repositories, run state, and PR outcomes.
+        </p>
+      </div>
+      <button class="btn" id="refreshBtn">Refresh</button>
+    </div>
+
+    <div class="controls">
+      <input id="searchInput" type="text" placeholder="Search request/repo/sender" />
+      <select id="stateFilter">
+        <option value="">All states</option>
+        <option value="awaiting_approval">Awaiting approval</option>
+        <option value="ready">Ready</option>
+        <option value="succeeded">Succeeded</option>
+        <option value="failed">Failed</option>
+        <option value="cancelled">Cancelled</option>
+      </select>
+      <button class="btn danger" id="resetAllBtn">Reset All Requests</button>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="label">Autonomy</div>
+        <div class="value" id="autonomy">-</div>
+      </div>
+      <div class="card">
+        <div class="label">Tasks</div>
+        <div class="value" id="taskCount">0</div>
+      </div>
+      <div class="card">
+        <div class="label">Polling Mode</div>
+        <div class="value" id="pollingMode">-</div>
+      </div>
+      <div class="card">
+        <div class="label">Last Poll</div>
+        <div class="value" id="lastPoll">-</div>
+      </div>
+      <div class="card">
+        <div class="label">Model Runtime</div>
+        <div class="value" id="modelRuntime">-</div>
+      </div>
+      <div class="card">
+        <div class="label">Primary Provider</div>
+        <div class="value" id="primaryProvider">-</div>
+      </div>
+      <div class="card">
+        <div class="label">Fallback Provider</div>
+        <div class="value" id="fallbackProvider">-</div>
+      </div>
+      <div class="card">
+        <div class="label">Embedding Provider</div>
+        <div class="value" id="embeddingProvider">-</div>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Request</th>
+          <th>Task</th>
+          <th>Repository</th>
+          <th>Status</th>
+          <th>Run</th>
+          <th>PR</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="rows">
+        <tr><td colspan="7" class="muted">Loading...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    function esc(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;");
+    }
+
+    function statePill(state) {
+      const safe = esc(state || "unknown");
+      return `<span class="pill state-${safe}">${safe}</span>`;
+    }
+
+    function taskUrl(taskId) {
+      return `/tasks/${taskId}/timeline`;
+    }
+
+    async function callApi(url, method, payload = null) {
+      const response = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: payload ? JSON.stringify(payload) : undefined,
+      });
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(body || `HTTP ${response.status}`);
+      }
+      return response.json();
+    }
+
+    async function approveTask(taskId) {
+      await callApi(`/tasks/${taskId}/approve`, "POST");
+      await load();
+    }
+
+    async function rejectTask(taskId) {
+      const reason = prompt("Reject reason (optional):", "");
+      await callApi(`/tasks/${taskId}/reject`, "POST", { reason });
+      await load();
+    }
+
+    async function deleteTask(taskId) {
+      if (!confirm(`Delete task ${taskId}?`)) {
+        return;
+      }
+      await callApi(`/tasks/${taskId}`, "DELETE");
+      await load();
+    }
+
+    async function resetAllRequests() {
+      if (!confirm("Delete all requests/tasks/runs and poll cursor?")) {
+        return;
+      }
+      await callApi("/admin/requests/reset", "POST", { clear_poll_cursors: true });
+      await load();
+    }
+
+    async function load() {
+      const res = await fetch("/dashboard/data");
+      const data = await res.json();
+      document.getElementById("autonomy").textContent = data.autonomy_mode || "-";
+      document.getElementById("taskCount").textContent = String(data.task_count || 0);
+      document.getElementById("pollingMode").textContent = data.polling?.mode || "-";
+      document.getElementById("lastPoll").textContent =
+        data.polling?.cursor?.last_polled_at || "-";
+      document.getElementById("modelRuntime").textContent = data.model?.runtime || "-";
+      document.getElementById("primaryProvider").textContent =
+        data.model?.primary_provider || "-";
+      document.getElementById("fallbackProvider").textContent =
+        data.model?.fallback_provider || "-";
+      document.getElementById("embeddingProvider").textContent =
+        data.model?.embedding_provider || "-";
+
+      const search = (document.getElementById("searchInput").value || "").toLowerCase();
+      const stateFilter = document.getElementById("stateFilter").value || "";
+      const rows = (data.tasks || []).filter((item) => {
+        const matchesState = !stateFilter || item.state === stateFilter;
+        const haystack = [
+          item.title,
+          item.task_id,
+          item.request?.source_repository,
+          item.request?.target_repository,
+          item.request?.sender,
+          item.request?.body,
+        ]
+          .join(" ")
+          .toLowerCase();
+        const matchesSearch = !search || haystack.includes(search);
+        return matchesState && matchesSearch;
+      });
+      const tbody = document.getElementById("rows");
+      if (!rows.length) {
+        tbody.innerHTML =
+          '<tr><td colspan="7" class="muted">No tasks found for current filters.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = rows
+        .map((item) => {
+          const req = item.request || {};
+          const run = item.run || {};
+          const pr = item.pull_request || null;
+          const issueNumber = req.issue_number ? `#${req.issue_number}` : "-";
+          const body = esc((req.body || "").slice(0, 160));
+          const taskId = esc(item.task_id);
+          const taskLink =
+            `<a href="${taskUrl(taskId)}" target="_blank" ` +
+            `rel="noreferrer" class="mono">${taskId.slice(0, 8)}</a>`;
+          const prHtml = pr?.url
+            ? `<a href="${esc(pr.url)}" target="_blank" ` +
+              `rel="noreferrer">PR #${esc(pr.number)}</a>`
+            : '<span class="muted">None</span>';
+          const actions = item.state === "awaiting_approval"
+            ? `<div class="actions">
+                <button class="btn warn" onclick="approveTask('${taskId}')">Approve</button>
+                <button class="btn danger" onclick="rejectTask('${taskId}')">Reject</button>
+                <button class="btn" onclick="deleteTask('${taskId}')">Delete</button>
+              </div>`
+            : `<div class="actions"><button class="btn" onclick="deleteTask('${taskId}')">Delete</button></div>`;
+
+          return `<tr>
+            <td>
+              <div><strong>${esc(item.title)}</strong></div>
+              <div class="muted">${issueNumber} by ${esc(req.sender || "unknown")}</div>
+              <div class="muted">${body}</div>
+            </td>
+            <td>
+              <div>${taskLink}</div>
+              <div class="muted">${esc(item.created_at || "")}</div>
+            </td>
+            <td>
+              <div><span class="mono">${esc(req.target_repository || "-")}</span></div>
+              <div class="muted">from ${esc(req.source_repository || "-")}</div>
+            </td>
+            <td>${statePill(item.state)}</td>
+            <td>
+              <div class="mono">${esc(run.run_id || "-")}</div>
+              <div class="muted">${esc(run.status || "-")}</div>
+              <div class="muted">${esc(run.pr_draft_title || "")}</div>
+              <div class="muted">model: ${esc(run.model_used || data.model?.primary_provider || "-")}</div>
+            </td>
+            <td>${prHtml}</td>
+            <td>${actions}</td>
+          </tr>`;
+        })
+        .join("");
+    }
+
+    document
+      .getElementById("refreshBtn")
+      .addEventListener("click", () => void load());
+    document
+      .getElementById("resetAllBtn")
+      .addEventListener("click", () => void resetAllRequests());
+    document
+      .getElementById("searchInput")
+      .addEventListener("input", () => void load());
+    document
+      .getElementById("stateFilter")
+      .addEventListener("change", () => void load());
+    void load();
+    setInterval(() => void load(), 15000);
+  </script>
+</body>
+</html>

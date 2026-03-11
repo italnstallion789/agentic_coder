@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from agentic_coder import worker as worker_module
 from agentic_coder.agents.coder import PatchProposal
 from agentic_coder.agents.planner import PlanResult
 from agentic_coder.agents.pr_generator import PullRequestDraft
@@ -22,6 +23,7 @@ class _PipelineResult:
     pr_draft: PullRequestDraft
     graph_summary: dict[str, int]
     indexed_files: int
+    model_used: str | None = None
 
 
 class _PipelineStub:
@@ -107,3 +109,50 @@ def test_resolve_workspace_root_by_repo_name() -> None:
 
     resolved = resolve_workspace_root(_Policy(), "acme/predictiv")
     assert str(resolved) == "/tmp"
+
+
+def test_process_task_fails_on_control_repo_path_leak(monkeypatch) -> None:
+    class _LeakyPipeline:
+        def __init__(self, workspace_root: Path) -> None:
+            _ = workspace_root
+
+        def run(self, task: TaskRecord) -> _PipelineResult:
+            _ = task
+            return _PipelineResult(
+                plan=PlanResult(objective="Implement", steps=["step1"]),
+                proposal=PatchProposal(
+                    summary="Wrong repo paths",
+                    target_files=["src/agentic_coder/worker.py"],
+                ),
+                review=ReviewResult(approved=True, feedback="ok"),
+                security=SecurityResult(passed=True, findings=[]),
+                test_plan=ExecutionTestPlan(commands=["pytest -q"]),
+                pr_draft=PullRequestDraft(title="PR", body="Body"),
+                graph_summary={"nodes": 1, "edges": 0},
+                indexed_files=1,
+            )
+
+    class _LeakRepo(_RepoStub):
+        def __init__(self) -> None:
+            super().__init__()
+            self.task.payload = {
+                "title": "Implement cache",
+                "body": "",
+                "source_repository": "acme/agentic_coder",
+                "repository": "acme/predictiv",
+            }
+
+    monkeypatch.setattr(worker_module, "TaskPipeline", _LeakyPipeline)
+    repo = _LeakRepo()
+    run_id = process_task(
+        repo,
+        "task-1",
+        title="Implement cache",
+        autonomy_mode="gated",
+        workspace_root=Path.cwd(),
+    )
+
+    assert run_id == "run-1"
+    assert repo.completed_status == "failed"
+    assert repo.task.state == TaskState.FAILED
+    assert "proposal_target_mismatch" in repo.events

@@ -15,12 +15,18 @@ class Settings(BaseSettings):
     github_private_key: str = ""
     github_private_key_path: Path | None = None
     github_api_base_url: str = "https://api.github.com"
+    github_models_api_key: str = ""
+    github_models_base_url: str = "https://models.inference.ai.azure.com"
+    github_models_chat_model: str = "gpt-4.1-mini"
     github_startup_self_check: bool = True
     github_startup_self_check_fail_fast: bool = False
     policy_path: Path = Path("agentic.yaml")
     database_url: str = "postgresql+psycopg://agentic_coder:agentic_coder@postgres:5432/agentic_coder"
     redis_url: str = "redis://redis:6379/0"
     queue_name: str = "agentic:tasks"
+    ollama_base_url: str = "http://ollama:11434"
+    ollama_chat_model: str = "llama3.1:8b"
+    model_request_timeout_seconds: float = 40.0
 
     model_config = SettingsConfigDict(
         env_file=".env",

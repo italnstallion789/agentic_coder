@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from agentic_coder.db.models import PollCursorORM, RunEventORM, RunORM, TaskORM, TaskTransitionORM
@@ -224,6 +224,32 @@ class TaskRepository:
             cursor.updated_at = datetime.now(UTC)
         self.session.add(cursor)
         self.session.commit()
+
+    def delete_task(self, task_id: str) -> bool:
+        stmt = select(TaskORM).where(TaskORM.task_id == task_id)
+        task = self.session.scalar(stmt)
+        if task is None:
+            return False
+        self.session.delete(task)
+        self.session.commit()
+        return True
+
+    def clear_all_requests(self, *, clear_poll_cursors: bool = True) -> dict[str, int]:
+        run_events_deleted = self.session.execute(delete(RunEventORM)).rowcount or 0
+        transitions_deleted = self.session.execute(delete(TaskTransitionORM)).rowcount or 0
+        runs_deleted = self.session.execute(delete(RunORM)).rowcount or 0
+        tasks_deleted = self.session.execute(delete(TaskORM)).rowcount or 0
+        poll_cursors_deleted = 0
+        if clear_poll_cursors:
+            poll_cursors_deleted = self.session.execute(delete(PollCursorORM)).rowcount or 0
+        self.session.commit()
+        return {
+            "tasks_deleted": int(tasks_deleted),
+            "runs_deleted": int(runs_deleted),
+            "transitions_deleted": int(transitions_deleted),
+            "run_events_deleted": int(run_events_deleted),
+            "poll_cursors_deleted": int(poll_cursors_deleted),
+        }
 
     @staticmethod
     def _to_record(task: TaskORM) -> TaskRecord:

@@ -273,6 +273,40 @@ class GitHubAppService:
         response.raise_for_status()
         return response.json()
 
+    async def create_issue_comment(
+        self,
+        repository: str,
+        issue_number: int,
+        installation_token: str,
+        body: str,
+    ) -> dict[str, Any]:
+        url = f"{self.api_base_url}/repos/{repository}/issues/{issue_number}/comments"
+        headers = self._installation_headers(installation_token)
+        payload = {"body": body}
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, headers=headers, json=payload)
+
+        response.raise_for_status()
+        return response.json()
+
+    async def add_issue_labels(
+        self,
+        repository: str,
+        issue_number: int,
+        installation_token: str,
+        labels: list[str],
+    ) -> dict[str, Any]:
+        url = f"{self.api_base_url}/repos/{repository}/issues/{issue_number}/labels"
+        headers = self._installation_headers(installation_token)
+        payload = {"labels": labels}
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, headers=headers, json=payload)
+
+        response.raise_for_status()
+        return {"labels": response.json()}
+
     async def get_file_sha(
         self,
         repository: str,
