@@ -7,7 +7,12 @@ system:
   allowed_target_repositories:
     - predictiv
   local_repository_paths:
-    predictiv: /home/alex/Development/predictiv
+    predictiv: /repos/predictiv
+    italnstallion789/predictiv: /repos/predictiv
+  default_target_base_branch: develop
+  target_base_branches:
+    italnstallion789/predictiv: develop
+    predictiv: develop
 autonomy:
   mode: gated
   allowed_actions:
@@ -29,8 +34,8 @@ sandbox:
   max_cpu_cores: 2
   max_memory_mb: 2048
 models:
-  primary_provider: auto
-  fallback_provider: ollama
+  primary_provider: github
+  fallback_provider: null
   embedding_provider: github
 trigger:
   mode: polling
