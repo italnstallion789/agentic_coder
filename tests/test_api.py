@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -44,6 +45,8 @@ class _FakeRepo:
         assert title
         assert payload["repository"] == "acme/predictiv"
         assert payload["source_repository"] == "acme/control"
+        assert payload["source_installation_id"] == payload["installation_id"]
+        assert payload["target_installation_id"] == payload["installation_id"]
         return _FakeTask(task_id="task-123")
 
 
@@ -403,3 +406,159 @@ def test_dashboard_data_endpoint(monkeypatch) -> None:
     assert task["request"]["target_repository"] == "acme/predictiv"
     assert task["run"]["run_id"] == "run-1"
     assert task["pull_request"]["number"] == 7
+
+
+class _ChatPolicy:
+    class system:  # noqa: N801
+        control_repository = "acme/control"
+        allow_any_target_repository = False
+        allowed_target_repositories = ["acme/predictiv", "predictiv"]
+        target_base_branches = {}
+        default_target_base_branch = "main"
+
+    class autonomy:  # noqa: N801
+        mode = "gated"
+
+    class trigger:  # noqa: N801
+        mode = "polling"
+        poll_interval_seconds = 60
+        max_items_per_poll = 50
+
+    class models:  # noqa: N801
+        primary_provider = "github"
+        fallback_provider = None
+        embedding_provider = "github"
+
+
+class _ChatExecutionRepo:
+    created_payload: dict[str, object] | None = None
+    appended_messages: list[dict[str, object]] = []
+    session_metadata: dict[str, object] = {}
+
+    def __init__(self, session) -> None:  # noqa: ANN001
+        self.session = session
+
+    def get_chat_session(self, session_id: str) -> dict[str, object] | None:
+        if session_id != "chat-1":
+            return None
+        now = datetime.now(UTC)
+        return {
+            "session_id": "chat-1",
+            "title": "Enterprise request",
+            "target_repository": "acme/predictiv",
+            "created_by": "alex.ops",
+            "metadata": dict(self.__class__.session_metadata),
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def get_active_chat_task(self, *, session_id: str) -> TaskRecord | None:
+        _ = session_id
+        return None
+
+    def list_chat_messages(self, *, session_id: str, limit: int = 500) -> list[dict[str, object]]:
+        _ = session_id, limit
+        return [
+            {
+                "message_id": "msg-1",
+                "session_id": "chat-1",
+                "role": "user",
+                "content": "Implement rate limiting and tests.",
+                "metadata": {},
+                "created_at": datetime.now(UTC),
+            }
+        ]
+
+    def get_latest_run_for_task(self, task_id: str) -> dict[str, object] | None:
+        _ = task_id
+        return None
+
+    def create(self, title: str, payload: dict[str, object]) -> TaskRecord:
+        self.__class__.created_payload = dict(payload)
+        now = datetime.now(UTC)
+        return TaskRecord(
+            task_id="chat-task-1",
+            title=title,
+            payload=payload,
+            state=TaskState.RECEIVED,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def append_chat_message(
+        self,
+        *,
+        session_id: str,
+        role: str,
+        content: str,
+        metadata: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        message = {
+            "message_id": "system-1",
+            "session_id": session_id,
+            "role": role,
+            "content": content,
+            "metadata": metadata or {},
+            "created_at": datetime.now(UTC),
+        }
+        self.__class__.appended_messages.append(message)
+        return message
+
+
+def test_execute_chat_session_requires_issue_number_when_gated(monkeypatch) -> None:
+    from agentic_coder.api import main
+
+    _ChatExecutionRepo.created_payload = None
+    _ChatExecutionRepo.appended_messages = []
+    _ChatExecutionRepo.session_metadata = {}
+    monkeypatch.setattr(main, "TaskRepository", _ChatExecutionRepo)
+    monkeypatch.setattr(main, "create_session_factory", lambda: _FakeSessionFactory())
+    monkeypatch.setattr(main, "load_policy", lambda: (Path("agentic.yaml"), _ChatPolicy()))
+
+    response = client.post("/chat/sessions/chat-1/execute", json={})
+
+    assert response.status_code == 400
+    data = response.json()
+    assert "approval_issue_number" in str(data["detail"])
+
+
+def test_execute_chat_session_routes_source_and_target_installations(monkeypatch) -> None:
+    from agentic_coder.api import main
+
+    _ChatExecutionRepo.created_payload = None
+    _ChatExecutionRepo.appended_messages = []
+    _ChatExecutionRepo.session_metadata = {"approval_issue_number": 77}
+
+    monkeypatch.setattr(main, "TaskRepository", _ChatExecutionRepo)
+    monkeypatch.setattr(main, "create_session_factory", lambda: _FakeSessionFactory())
+    monkeypatch.setattr(main, "load_policy", lambda: (Path("agentic.yaml"), _ChatPolicy()))
+
+    async def _fake_installation_lookup(repository: str) -> int:
+        if repository == "acme/control":
+            return 111
+        if repository == "acme/predictiv":
+            return 222
+        raise AssertionError(f"Unexpected repository: {repository}")
+
+    monkeypatch.setattr(main, "resolve_repository_installation_id", _fake_installation_lookup)
+    fake_queue = _FakeQueue()
+    monkeypatch.setattr(main.RedisTaskQueue, "from_settings", lambda: fake_queue)
+
+    response = client.post("/chat/sessions/chat-1/execute", json={})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["queued"] is True
+    assert data["task_id"] == "chat-task-1"
+    assert data["approval_issue_number"] == 77
+    assert data["source_installation_id"] == 111
+    assert data["target_installation_id"] == 222
+    assert fake_queue.enqueued == ["chat-task-1"]
+
+    assert _ChatExecutionRepo.created_payload is not None
+    payload = _ChatExecutionRepo.created_payload
+    assert payload["source_repository"] == "acme/control"
+    assert payload["source_installation_id"] == 111
+    assert payload["target_installation_id"] == 222
+    assert payload["installation_id"] == 222
+    assert payload["issue_number"] == 77

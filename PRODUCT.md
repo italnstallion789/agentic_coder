@@ -276,6 +276,35 @@ knowledge_graph:
 
 ---
 
+## Chat Control Plane (Enterprise Intake)
+
+The platform now includes a first-class chat intake UI at `GET /chat` for remote operation.
+
+- Persistent chat sessions are stored in PostgreSQL (`chat_sessions`, `chat_messages`)
+- Each session is bound to an allowed target repository
+- Operator identity is carried on each write via `X-Operator`
+- Session execution enqueues a normal task into the same pipeline and queue
+- Session transcripts are converted into task payloads with full run traceability
+
+### Gated Mode with Chat
+
+In `gated` autonomy mode, chat execution requires a GitHub approval issue number so approvals remain remote and GitHub-native:
+
+- Set `approval_issue_number` on session create, or pass it during execute
+- Worker posts approval-request/status comments to the control repository issue
+- `/approve` and `/reject` comments continue to drive transitions and PR creation
+
+### Installation Context Separation
+
+Task payloads carry both installation contexts:
+
+- `source_installation_id` for source/control repo issue comments + labels
+- `target_installation_id` for branch/commit/PR operations in target repo
+
+This prevents cross-repo token misuse when source and target repos are not under the same installation.
+
+---
+
 ## Command Syntax (GitHub Comments)
 
 ### Triggering a Task
@@ -351,6 +380,14 @@ Approves a specific task by ID.
 | `POST` | `/runs/{run_id}/pull-request` | Manually trigger PR creation for a run |
 | `GET` | `/dashboard` | HTML dashboard UI |
 | `GET` | `/dashboard/data` | Dashboard JSON data |
+| `GET` | `/chat` | Chat control-plane UI |
+| `POST` | `/chat/sessions` | Create chat session |
+| `GET` | `/chat/sessions` | List chat sessions |
+| `GET` | `/chat/sessions/{session_id}` | Chat session detail |
+| `GET` | `/chat/sessions/{session_id}/messages` | Chat transcript messages |
+| `POST` | `/chat/sessions/{session_id}/messages` | Append chat message |
+| `GET` | `/chat/sessions/{session_id}/runs` | Task/run history for session |
+| `POST` | `/chat/sessions/{session_id}/execute` | Enqueue chat session as pipeline task |
 
 ---
 

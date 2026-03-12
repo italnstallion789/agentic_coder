@@ -1,10 +1,11 @@
 import asyncio
+import re
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -80,6 +81,27 @@ class CreateTaskRequest(BaseModel):
     enqueue: bool = True
 
 
+class CreateChatSessionRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=256)
+    target_repository: str = Field(min_length=1, max_length=256)
+    approval_issue_number: int | None = Field(default=None, ge=1)
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class AppendChatMessageRequest(BaseModel):
+    role: Literal["user", "assistant", "system"] = "user"
+    content: str = Field(min_length=1, max_length=8000)
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class ExecuteChatSessionRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=256)
+    target_repository: str | None = Field(default=None, max_length=256)
+    include_transcript_limit: int = Field(default=40, ge=1, le=200)
+    force_new: bool = False
+    approval_issue_number: int | None = Field(default=None, ge=1)
+
+
 class TaskDecisionRequest(BaseModel):
     reason: str | None = None
 
@@ -112,6 +134,68 @@ def should_accept_body_as_command(body: str) -> bool:
         or "/approval" in lowered
         or "/reject" in lowered
     )
+
+
+def normalize_operator_identity(value: str | None, *, fallback: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return fallback
+    collapsed = re.sub(r"\s+", "-", raw)
+    normalized = re.sub(r"[^A-Za-z0-9_.:@/\-]+", "-", collapsed).strip("-")
+    return (normalized or fallback)[:128]
+
+
+def parse_positive_int(value: object) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
+
+
+def build_chat_transcript(
+    messages: list[dict[str, object]],
+    *,
+    limit: int,
+) -> str:
+    relevant = messages[-max(1, limit) :]
+    lines = ["Chat session transcript:"]
+    for message in relevant:
+        role = str(message.get("role") or "user").strip().lower()
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+        lines.append(f"[{role}] {content}")
+    return "\n".join(lines)
+
+
+async def resolve_repository_installation_id(repository: str) -> int:
+    settings = get_settings()
+    if not settings.github_app_id or not settings.github_private_key:
+        raise HTTPException(status_code=500, detail="GitHub App credentials are missing")
+
+    github = GitHubAppService(
+        settings.github_app_id,
+        settings.github_private_key,
+        api_base_url=settings.github_api_base_url,
+    )
+    try:
+        installation = await github.get_repository_installation(repository)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to resolve installation for {repository}: {exc}",
+        ) from exc
+
+    installation_id = installation.get("id")
+    if not installation_id:
+        raise HTTPException(
+            status_code=502,
+            detail=f"GitHub installation id missing for repository {repository}",
+        )
+    return int(installation_id)
 
 
 def _extract_pull_request(events: list[dict[str, object]]) -> dict[str, object] | None:
@@ -545,6 +629,322 @@ def dashboard_page() -> str:
     return template_path.read_text(encoding="utf-8")
 
 
+@app.get("/chat", response_class=HTMLResponse)
+def chat_page(_admin: None = Depends(require_admin_token)) -> str:
+    template_path = Path(__file__).with_name("chat.html")
+    return template_path.read_text(encoding="utf-8")
+
+
+@app.post("/chat/sessions")
+def create_chat_session(
+    request_body: CreateChatSessionRequest,
+    _admin: None = Depends(require_admin_token),
+    x_operator: str | None = Header(default=None),
+) -> dict[str, object]:
+    _, policy = load_policy()
+    resolved_repository = expand_target_repository(policy, request_body.target_repository)
+    if not is_target_repository_allowed(policy, resolved_repository):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Target repository not allowed: {resolved_repository}",
+        )
+
+    created_by = normalize_operator_identity(x_operator, fallback="remote-operator")
+    metadata = dict(request_body.metadata)
+    if request_body.approval_issue_number is not None:
+        metadata["approval_issue_number"] = request_body.approval_issue_number
+
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        created = repo.create_chat_session(
+            title=request_body.title.strip() or "Untitled chat session",
+            target_repository=resolved_repository,
+            created_by=created_by,
+            metadata=metadata,
+        )
+
+    approval_issue_number = parse_positive_int(
+        (created.get("metadata") or {}).get("approval_issue_number")
+    )
+    return {
+        "session": {
+            **created,
+            "approval_issue_number": approval_issue_number,
+            "created_at": created["created_at"].isoformat(),
+            "updated_at": created["updated_at"].isoformat(),
+        }
+    }
+
+
+@app.get("/chat/sessions")
+def list_chat_sessions(
+    limit: int = Query(default=50, ge=1, le=200),
+    _admin: None = Depends(require_admin_token),
+) -> dict[str, list[dict[str, object]]]:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        sessions = repo.list_chat_sessions(limit=limit)
+    return {
+        "sessions": [
+            {
+                **item,
+                "approval_issue_number": parse_positive_int(
+                    (item.get("metadata") or {}).get("approval_issue_number")
+                ),
+                "created_at": item["created_at"].isoformat(),
+                "updated_at": item["updated_at"].isoformat(),
+            }
+            for item in sessions
+        ]
+    }
+
+
+@app.get("/chat/sessions/{session_id}")
+def get_chat_session(
+    session_id: str,
+    _admin: None = Depends(require_admin_token),
+) -> dict[str, object]:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        chat_session = repo.get_chat_session(session_id)
+        if chat_session is None:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+    return {
+        "session": {
+            **chat_session,
+            "approval_issue_number": parse_positive_int(
+                (chat_session.get("metadata") or {}).get("approval_issue_number")
+            ),
+            "created_at": chat_session["created_at"].isoformat(),
+            "updated_at": chat_session["updated_at"].isoformat(),
+        }
+    }
+
+
+@app.get("/chat/sessions/{session_id}/messages")
+def list_chat_messages(
+    session_id: str,
+    limit: int = Query(default=500, ge=1, le=1000),
+    _admin: None = Depends(require_admin_token),
+) -> dict[str, list[dict[str, object]]]:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        chat_session = repo.get_chat_session(session_id)
+        if chat_session is None:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+        messages = repo.list_chat_messages(session_id=session_id, limit=limit)
+    return {
+        "messages": [
+            {
+                **item,
+                "created_at": item["created_at"].isoformat(),
+            }
+            for item in messages
+        ]
+    }
+
+
+@app.post("/chat/sessions/{session_id}/messages")
+def append_chat_message(
+    session_id: str,
+    request_body: AppendChatMessageRequest,
+    _admin: None = Depends(require_admin_token),
+) -> dict[str, object]:
+    content = request_body.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Message content is required")
+
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        chat_session = repo.get_chat_session(session_id)
+        if chat_session is None:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+        message = repo.append_chat_message(
+            session_id=session_id,
+            role=request_body.role,
+            content=content,
+            metadata=request_body.metadata,
+        )
+    return {
+        "message": {
+            **message,
+            "created_at": message["created_at"].isoformat(),
+        }
+    }
+
+
+@app.get("/chat/sessions/{session_id}/runs")
+def list_chat_session_runs(
+    session_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+    _admin: None = Depends(require_admin_token),
+) -> dict[str, object]:
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        chat_session = repo.get_chat_session(session_id)
+        if chat_session is None:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+        tasks = repo.list_tasks_for_chat_session(session_id=session_id, limit=limit)
+        task_views = [_build_dashboard_task_view(repo, task) for task in tasks]
+    return {
+        "session_id": session_id,
+        "tasks": task_views,
+    }
+
+
+@app.post("/chat/sessions/{session_id}/execute")
+async def execute_chat_session(
+    session_id: str,
+    request_body: ExecuteChatSessionRequest,
+    _admin: None = Depends(require_admin_token),
+    x_operator: str | None = Header(default=None),
+) -> dict[str, object]:
+    _, policy = load_policy()
+    session_factory = create_session_factory()
+
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        chat_session = repo.get_chat_session(session_id)
+        if chat_session is None:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+
+        target_repository = str(
+            request_body.target_repository or chat_session["target_repository"]
+        ).strip()
+        if not target_repository:
+            raise HTTPException(status_code=400, detail="Target repository is required")
+
+        target_repository = expand_target_repository(policy, target_repository)
+        if not is_target_repository_allowed(policy, target_repository):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Target repository not allowed: {target_repository}",
+            )
+
+        if not request_body.force_new:
+            active_task = repo.get_active_chat_task(session_id=session_id)
+            if active_task is not None:
+                latest_run = repo.get_latest_run_for_task(active_task.task_id)
+                return {
+                    "ok": True,
+                    "reused": True,
+                    "task_id": active_task.task_id,
+                    "state": active_task.state.value,
+                    "run_id": (latest_run or {}).get("run_id"),
+                }
+
+        messages = repo.list_chat_messages(
+            session_id=session_id,
+            limit=request_body.include_transcript_limit,
+        )
+        if not messages:
+            raise HTTPException(status_code=400, detail="Chat session has no messages")
+
+    metadata = dict(chat_session.get("metadata") or {})
+    approval_issue_number = (
+        request_body.approval_issue_number
+        if request_body.approval_issue_number is not None
+        else parse_positive_int(metadata.get("approval_issue_number"))
+    )
+
+    source_repository = str(policy.system.control_repository or "").strip()
+    if policy.autonomy.mode == "gated" and approval_issue_number is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Gated mode chat execution requires an approval_issue_number. "
+                "Set it on the session or include it in execute payload."
+            ),
+        )
+
+    target_installation_id = await resolve_repository_installation_id(target_repository)
+    source_installation_id: int | None = None
+    if approval_issue_number is not None:
+        if not source_repository:
+            raise HTTPException(
+                status_code=400,
+                detail="Control repository is required to route GitHub approvals",
+            )
+        source_installation_id = await resolve_repository_installation_id(source_repository)
+
+    operator = normalize_operator_identity(x_operator, fallback="chat-ui")
+    transcript = build_chat_transcript(
+        messages,
+        limit=request_body.include_transcript_limit,
+    )
+    task_title = (request_body.title or str(chat_session["title"]) or "Chat execution").strip()
+    if not task_title:
+        task_title = "Chat execution"
+
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        task = repo.create(
+            title=task_title,
+            payload={
+                "event_name": "chat_session_execute",
+                "source_repository": source_repository or "chat-ui",
+                "repository": target_repository,
+                "installation_id": target_installation_id,
+                "target_installation_id": target_installation_id,
+                "source_installation_id": source_installation_id,
+                "title": task_title,
+                "body": transcript,
+                "sender": operator,
+                "chat_session_id": session_id,
+                "chat_message_count": len(messages),
+                "requested_at": datetime.now(UTC).isoformat(),
+                "issue_number": approval_issue_number,
+                "approval_mode": "github_issue" if approval_issue_number else "none",
+            },
+        )
+        repo.append_chat_message(
+            session_id=session_id,
+            role="system",
+            content=(
+                f"Execution requested for {target_repository}; task {task.task_id}"
+                + (
+                    f"; approval issue #{approval_issue_number}"
+                    if approval_issue_number is not None
+                    else ""
+                )
+            ),
+            metadata={
+                "task_id": task.task_id,
+                "target_repository": target_repository,
+                "force_new": request_body.force_new,
+                "approval_issue_number": approval_issue_number,
+            },
+        )
+
+    queue_error: str | None = None
+    try:
+        queue = RedisTaskQueue.from_settings()
+        queue.enqueue(task.task_id)
+    except Exception as exc:  # pragma: no cover - runtime env path
+        queue_error = str(exc)
+
+    return {
+        "ok": True,
+        "reused": False,
+        "task_id": task.task_id,
+        "state": task.state.value,
+        "queued": queue_error is None,
+        "queue_error": queue_error,
+        "target_repository": target_repository,
+        "installation_id": target_installation_id,
+        "target_installation_id": target_installation_id,
+        "source_installation_id": source_installation_id,
+        "approval_issue_number": approval_issue_number,
+    }
+
+
 @app.post("/tasks/{task_id}/approve")
 def approve_task(
     task_id: str,
@@ -745,6 +1145,8 @@ async def github_webhook(
                 "source_repository": normalized.source_repository,
                 "repository": normalized.target_repository,
                 "installation_id": normalized.installation_id,
+                "source_installation_id": normalized.installation_id,
+                "target_installation_id": normalized.installation_id,
                 "title": normalized.title,
                 "body": normalized.body,
                 "issue_number": normalized.issue_number,
@@ -805,7 +1207,11 @@ async def create_pull_request_from_run(
     if not is_target_repository_allowed(policy, repository):
         raise HTTPException(status_code=403, detail=f"Target repository not allowed: {repository}")
 
-    installation_id = int(task_payload.get("installation_id") or request_body.installation_id)
+    installation_id = int(
+        task_payload.get("target_installation_id")
+        or task_payload.get("installation_id")
+        or request_body.installation_id
+    )
 
     pr_title = str((run.get("metadata") or {}).get("pr_title") or task.title)
     pr_event = next((event for event in events if event["event_type"] == "pr_draft"), None)

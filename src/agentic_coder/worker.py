@@ -403,7 +403,9 @@ def create_pr_for_ready_task(
 
     payload = task.payload
     repository = str(payload.get("repository") or "")
-    installation_id = int(payload.get("installation_id") or 0)
+    installation_id = int(
+        payload.get("target_installation_id") or payload.get("installation_id") or 0
+    )
     if not repository or installation_id <= 0:
         return False
 
@@ -535,10 +537,22 @@ def publish_approval_request_comment(
 ) -> None:
     source_repository = str(task_payload.get("source_repository") or "")
     issue_number = int(task_payload.get("issue_number") or 0)
-    installation_id = int(task_payload.get("installation_id") or 0)
+    installation_id = int(
+        task_payload.get("source_installation_id") or task_payload.get("installation_id") or 0
+    )
     target_repository = str(task_payload.get("repository") or "")
 
     if not source_repository or issue_number <= 0 or installation_id <= 0:
+        repo.append_run_event(
+            run_id,
+            "approval_comment_skipped",
+            {
+                "reason": "missing_issue_context",
+                "source_repository": source_repository,
+                "issue_number": issue_number,
+                "installation_id": installation_id,
+            },
+        )
         return
 
     events = repo.list_run_events(run_id=run_id, limit=200)
@@ -600,7 +614,9 @@ def publish_issue_status_update(
 ) -> None:
     source_repository = str(task_payload.get("source_repository") or "")
     issue_number = int(task_payload.get("issue_number") or 0)
-    installation_id = int(task_payload.get("installation_id") or 0)
+    installation_id = int(
+        task_payload.get("source_installation_id") or task_payload.get("installation_id") or 0
+    )
     if not source_repository or issue_number <= 0 or installation_id <= 0:
         return
 
@@ -925,6 +941,8 @@ def poll_control_repository_once(
                     "source_repository": normalized.source_repository,
                     "repository": normalized.target_repository,
                     "installation_id": normalized.installation_id,
+                    "source_installation_id": normalized.installation_id,
+                    "target_installation_id": normalized.installation_id,
                     "title": normalized.title,
                     "body": normalized.body,
                     "issue_number": normalized.issue_number,
