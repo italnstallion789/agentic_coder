@@ -47,7 +47,10 @@ class PlannerAgent:
             f"Body: {body or '(none)'}\n"
         )
         messages = [
-            ChatMessage(role="system", content="You are a senior software engineer. Respond only with valid JSON."),
+            ChatMessage(
+                role="system",
+                content="You are a senior software engineer. Respond only with valid JSON.",
+            ),
             ChatMessage(role="user", content=prompt),
         ]
         response = asyncio.run(self.model.chat(messages))

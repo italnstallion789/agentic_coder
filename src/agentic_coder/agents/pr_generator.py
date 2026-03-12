@@ -59,7 +59,8 @@ class PullRequestGenerator:
             "You are a software engineer writing a GitHub pull request description.\n"
             "Return ONLY compact JSON with keys:\n"
             "  - title (string): concise PR title, max 72 characters\n"
-            "  - body (string): markdown PR body with sections: ## Summary, ## Changes, ## Testing\n\n"
+            "  - body (string): markdown PR body with sections:"
+            " ## Summary, ## Changes, ## Testing\n\n"
             f"Repository: {repo_name}\n"
             f"Objective: {plan.objective}\n"
             f"Implementation steps:\n{steps_text}\n"
@@ -67,7 +68,10 @@ class PullRequestGenerator:
             f"Files to modify: {file_list}\n"
         )
         messages = [
-            ChatMessage(role="system", content="You are a software engineer. Respond only with valid JSON."),
+            ChatMessage(
+                role="system",
+                content="You are a software engineer. Respond only with valid JSON.",
+            ),
             ChatMessage(role="user", content=prompt),
         ]
         response = asyncio.run(self.model.chat(messages))

@@ -31,7 +31,11 @@ class CodingAgent:
                 pass
         return self._propose_stub(plan, context_docs)
 
-    def _propose_stub(self, plan: PlanResult, context_docs: list[RetrievalDocument]) -> PatchProposal:
+    def _propose_stub(
+        self,
+        plan: PlanResult,
+        context_docs: list[RetrievalDocument],
+    ) -> PatchProposal:
         target_files = [doc.metadata.get("path", doc.doc_id) for doc in context_docs[:5]]
         summary = (
             f"Objective: {plan.objective}. "
@@ -64,7 +68,10 @@ class CodingAgent:
             f"Relevant files:\n{file_context or '(none indexed)'}\n"
         )
         messages = [
-            ChatMessage(role="system", content="You are an expert software engineer. Respond only with valid JSON."),
+            ChatMessage(
+                role="system",
+                content="You are an expert software engineer. Respond only with valid JSON.",
+            ),
             ChatMessage(role="user", content=prompt),
         ]
         response = asyncio.run(self.model.chat(messages))

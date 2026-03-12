@@ -43,7 +43,10 @@ class TestAgent:
             f"Affected files: {file_list}\n"
         )
         messages = [
-            ChatMessage(role="system", content="You are a QA engineer. Respond only with valid JSON."),
+            ChatMessage(
+                role="system",
+                content="You are a QA engineer. Respond only with valid JSON.",
+            ),
             ChatMessage(role="user", content=prompt),
         ]
         response = asyncio.run(self.model.chat(messages))

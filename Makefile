@@ -1,6 +1,6 @@
 COMPOSE ?= docker compose
 
-.PHONY: up down logs ps migrate bootstrap test lint format shell api worker executor
+.PHONY: up down logs ps migrate bootstrap test lint format shell api worker executor test-regression smoke qa
 
 up:
 	$(COMPOSE) up --build -d
@@ -42,3 +42,14 @@ worker:
 
 executor:
 	$(COMPOSE) up --build executor
+
+test-regression:
+	$(COMPOSE) run --rm api ruff check src tests scripts
+	$(COMPOSE) run --rm api python -m pytest tests -q
+
+smoke:
+	$(COMPOSE) up --build -d postgres redis api
+	$(COMPOSE) run --rm api python -m alembic upgrade head
+	$(COMPOSE) run --rm -e BASE_URL=http://api:8080 api python scripts/smoke_test.py --base-url http://api:8080 --target-repository predictiv --wait-seconds 180
+
+qa: test-regression smoke
