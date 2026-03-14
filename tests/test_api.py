@@ -430,6 +430,21 @@ def test_dashboard_data_endpoint(monkeypatch) -> None:
     assert task["pull_request"]["number"] == 7
 
 
+def test_chat_page_embeds_admin_token_requirement_flag(monkeypatch) -> None:
+    from agentic_coder.api import main
+
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: type("_Settings", (), {"api_admin_token": ""})(),
+    )
+
+    response = client.get("/chat")
+
+    assert response.status_code == 200
+    assert '"adminTokenRequired": false' in response.text
+
+
 class _ChatPolicy:
     class system:  # noqa: N801
         control_repository = "acme/control"

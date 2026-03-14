@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -633,7 +634,11 @@ def dashboard_page() -> str:
 @app.get("/chat", response_class=HTMLResponse)
 def chat_page(_admin: None = Depends(require_admin_token)) -> str:
     template_path = Path(__file__).with_name("chat.html")
-    return template_path.read_text(encoding="utf-8")
+    settings = get_settings()
+    return template_path.read_text(encoding="utf-8").replace(
+        "__AGENTIC_CHAT_CONFIG__",
+        json.dumps({"adminTokenRequired": bool(settings.api_admin_token)}),
+    )
 
 
 @app.post("/chat/sessions")
