@@ -1,110 +1,86 @@
-# Usage Guide: Agentic Coder Polling Workflow
+# Usage Guide: GitHub Comment and Chat Workflows
 
-## Triggering Tasks via GitHub Comments
+## GitHub comment workflow
 
-1. **Go to your control repository:**
-   - Navigate to `italnstallion789/agentic_coder` on GitHub.
+1. Open an issue in the control repository: `italnstallion789/agentic_coder`.
+2. Add a request comment with an agent command, for example:
 
-2. **Open an issue or pull request:**
-   - You can use an existing issue/PR or create a new one.
-
-3. **Add a comment with an agent command:**
-   - To trigger the agent, include `@agent` or `repo=...` in your comment. Example:
-
-     ```
-     @agent repo=italnstallion789/predictiv
-     Please implement a function to add two numbers in the target repo.
-     ```
-
-   - Or:
-
-     ```
-     /repo italnstallion789/predictiv
-     Add a README badge for build status.
-     ```
-
-4. **Agent polling and task creation:**
-   - The agent polls for new comments in the control repo.
-   - When it detects a valid command, it creates a task for the specified target repository.
-
-5. **Monitor task status:**
-   - Use API endpoints or logs to track task creation and progress.
-
-## Approving Gated Tasks Remotely
-
-When autonomy mode is `gated`, tasks stop at `awaiting_approval`. You can approve directly from GitHub comments.
-
-1. **On the same issue thread, add an approval comment:**
-
-   ```
-   /approve
+   ```text
+   @agent repo=italnstallion789/predictiv
+   Add a health-check endpoint and update the tests.
    ```
 
-2. **Optional: approve a specific task ID explicitly:**
+3. The worker polls the control repository, normalizes the request, stores the task in PostgreSQL, and enqueues it through Redis.
+4. Track progress through:
+   - `GET /tasks`
+   - `GET /tasks/{task_id}`
+   - `GET /tasks/{task_id}/timeline`
+   - `GET /dashboard`
 
-   ```
-   /approve <task_id>
-   ```
+## Remote approval workflow
 
-   or:
+When `autonomy.mode` is `gated`, the run pauses at `awaiting_approval` after planning, proposal generation, review, security scan, and PR draft generation.
 
-   ```
-   /approve task=<task_id>
-   ```
+Approve from the same control-repository issue thread with either:
 
-3. **What happens next:**
-   - Poller sees the approval command.
-   - Matching task transitions from `awaiting_approval` to `ready`.
-   - Agent opens a draft PR in the target repository from a feature branch.
-   - Task transitions to `succeeded` when PR creation completes.
-   - You can verify via `GET /tasks` and task timeline endpoints.
+```text
+/approve
+```
 
-4. **Reject a task remotely:**
+or:
 
-   ```
-   /reject <task_id> reason here
-   ```
+```text
+/approve <task_id>
+```
 
-   or:
+Reject with either:
 
-   ```
-   /reject reason here
-   ```
+```text
+/reject reason here
+```
 
-   This marks the matching task as `cancelled` with rejection details in timeline metadata.
+or:
 
-## Branching Behavior
+```text
+/reject <task_id> reason here
+```
 
-- When code changes are made, the agent creates a new feature branch in the target repository (not in the develop/main branch).
-- The branch name is typically `agentic/<run_id>` or similar.
-- A pull request is then opened from the feature branch to the default branch (e.g., `main` or `master`).
-- This ensures all changes are reviewed and merged via PR, keeping the develop/main branch clean.
+After approval, the worker opens a draft PR in the target repository from an `agentic/<run>` branch.
 
-## Summary
-- Use issue/PR comments in your control repo to trigger agentic tasks.
-- Specify the target repo with `repo=...` or `/repo ...`.
-- The agent creates feature branches and PRs for all code changes.
-- Monitor progress via API or logs.
+## Chat control plane workflow
 
-## Operations Dashboard
+The app also supports remote intake from `http://localhost:8080/chat`.
 
-- Open `http://localhost:8080/dashboard` for a human-readable UI.
-- Dashboard data endpoint: `GET /dashboard/data`.
-- Dashboard shows, per task:
-   - request title/body and sender
-   - source and target repository
-   - current task status
-   - run id and run status
-   - PR draft title and opened PR link (when available)
-   - polling summary (mode and last poll timestamp)
+1. Open `/chat`.
+2. If `API_ADMIN_TOKEN` is configured, enter it when prompted by the UI.
+3. Create a session for an allowed target repository.
+4. Add one or more messages describing the work.
+5. In `gated` mode, set an approval issue number on the session or execution request.
+6. Execute the session to enqueue it as a normal task.
 
-## Required GitHub App Permissions
+Chat sessions are persisted in PostgreSQL and linked back to any tasks they create.
 
-For remote status updates and approval comments, your GitHub App must include:
+## What the current PR contains
 
-- Metadata: Read
-- Contents: Read & Write
-- Pull requests: Read & Write
-- Issues: Read & Write
+The current implementation does not write model-generated source edits into the target repository.
 
-For more details, see the README or API documentation.
+- The branch contains a run artifact at `.agentic/runs/<run_id>.md`
+- The draft PR title/body come from the pipeline output
+- The proposal, target files, review result, and test plan are visible through task/run metadata
+
+This means the system is currently strongest as a controlled planning, approval, and orchestration layer rather than a full patch-writing engine.
+
+## Operational endpoints
+
+- `GET /healthz`
+- `GET /readyz`
+- `GET /startup/self-check`
+- `GET /polling/status`
+- `GET /dashboard`
+- `GET /chat`
+
+## Validation commands
+
+- `make test-regression`
+- `make smoke`
+- `make qa`

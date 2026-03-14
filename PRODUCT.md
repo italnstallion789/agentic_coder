@@ -2,9 +2,11 @@
 
 ## Overview
 
-Agentic Coder is a local-first, GitHub-native autonomous AI development platform. It runs as a self-hosted service that monitors a dedicated **control repository** on GitHub, picks up natural-language engineering tasks posted as issue comments, and autonomously plans, codes, reviews, and opens pull requests in one or more **target repositories** — all without requiring a public webhook endpoint.
+Agentic Coder is a local-first, GitHub-native autonomous AI development platform. It runs as a self-hosted service that monitors a dedicated **control repository** on GitHub, picks up natural-language engineering tasks posted as issue comments, and autonomously plans, retrieves context, reviews, and opens draft pull requests in one or more **target repositories** — all without requiring a public webhook endpoint.
 
 The platform is designed around a human-in-the-loop approval model: in `gated` mode (default), every proposed change waits for explicit sign-off via a GitHub comment before a PR is opened. In `autonomous` mode, the agent acts end-to-end without pausing.
+
+Current implementation note: the PR branch currently contains a run artifact (`.agentic/runs/<run_id>.md`) plus PR draft metadata. The pipeline does not yet write source-code edits into the target repository.
 
 ---
 
@@ -57,6 +59,13 @@ Create branch → commit artifact → open draft PR in target repo
 Post status update comment on source issue
 ```
 
+### Current Execution Semantics
+
+- The pipeline generates a `PatchProposal`, review result, security result, test plan, and PR draft
+- Approval and status comments are posted back to the control-repository issue when issue context is present
+- Target-repository PRs are currently artifact-backed and are intended as a controlled handoff / approval surface
+- Direct file patch application in the target repository is not implemented yet
+
 ---
 
 ## Data Model
@@ -91,6 +100,8 @@ RECEIVED → NORMALIZED → INDEXED → PLANNED → AWAITING_APPROVAL → READY 
 | `task_transitions` | Append-only log of every state change with reason and details |
 | `run_events` | Granular event timeline per run (plan_created, proposal_generated, pr_draft, etc.) |
 | `poll_cursors` | Durable per-repo polling position (last `updated_at` seen) |
+| `chat_sessions` | Persistent remote-operator chat sessions bound to target repositories |
+| `chat_messages` | Ordered transcript messages stored for each chat session |
 
 ---
 
@@ -205,6 +216,7 @@ version: 1
 
 system:
   name: agentic-coder
+  environment: development
   control_repository: owner/agentic_coder      # repo the agent polls for commands
   allow_any_target_repository: false           # must be false in production
   allowed_target_repositories:
@@ -232,6 +244,7 @@ autonomy:
 sandbox:
   profile: compose
   network_enabled: false
+  network_allowlist: []
   max_runtime_seconds: 900
   max_cpu_cores: 2
   max_memory_mb: 2048
@@ -250,7 +263,12 @@ knowledge_graph:
   enabled: true
   storage: postgres
   node_types: [repo, commit, file, symbol, test, issue, pr, task, artifact, decision]
-  edge_types: [contains, imports, depends_on, tests, resolves, generates]
+  edge_types: [contains, imports, defines, references, calls, changes, mentions, derived_from, related_to]
+
+budgets:
+  max_prompt_tokens: 32000
+  max_completion_tokens: 8000
+  max_parallel_candidates: 1
 ```
 
 ---
@@ -283,6 +301,7 @@ The platform now includes a first-class chat intake UI at `GET /chat` for remote
 - Persistent chat sessions are stored in PostgreSQL (`chat_sessions`, `chat_messages`)
 - Each session is bound to an allowed target repository
 - Operator identity is carried on each write via `X-Operator`
+- The page prompts for `X-Admin-Token` when `API_ADMIN_TOKEN` is configured
 - Session execution enqueues a normal task into the same pipeline and queue
 - Session transcripts are converted into task payloads with full run traceability
 
@@ -293,6 +312,7 @@ In `gated` autonomy mode, chat execution requires a GitHub approval issue number
 - Set `approval_issue_number` on session create, or pass it during execute
 - Worker posts approval-request/status comments to the control repository issue
 - `/approve` and `/reject` comments continue to drive transitions and PR creation
+- The resulting PR is still artifact-backed until direct patch application is implemented
 
 ### Installation Context Separation
 
