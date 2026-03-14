@@ -1,19 +1,25 @@
 # Agentic Coder
 
-A local-first autonomous AI development platform scaffold.
+Agentic Coder is a local-first, GitHub-native agent orchestration service for turning remote requests into tracked engineering runs.
 
 ## Current status
 
-This repository contains the initial implementation foundation for:
+The current implementation includes:
 
-- FastAPI control plane
-- GitHub App webhook verification scaffolding
-- YAML-based autonomy policy
-- durable task state machine primitives
-- model provider abstraction
-- in-memory knowledge graph and retrieval prototypes
-- sandbox execution policy scaffolding
-- audit log primitives
+- FastAPI control plane with health, readiness, dashboard, timeline, and self-check endpoints
+- PostgreSQL-backed tasks, runs, run events, transitions, polling cursors, chat sessions, and chat messages
+- Worker polling against a dedicated control repository with remote `/approve` and `/reject` handling
+- GitHub App integration for status comments, approval comments, branch creation, and draft PR opening
+- Chat control plane at `/chat` for remote operator-driven task intake
+- Automated regression, smoke, and CI coverage
+
+## Current execution scope
+
+The pipeline currently plans, retrieves context, reviews, generates validation commands, and drafts PR metadata.
+
+- The current PR flow is artifact-backed: it creates a target-repo branch, commits `.agentic/runs/<run_id>.md`, and opens a draft PR
+- It does not yet apply generated source-code edits into the target repository
+- That limitation should be kept in mind when operating the system or evaluating run results
 
 ## Development workflow
 
@@ -58,9 +64,22 @@ Notes:
 ### Initial bootstrap
 
 1. `make bootstrap`
-2. `make test`
+2. `make qa`
 
-Webhook task ingestion now persists tasks in PostgreSQL and enqueues task IDs in Redis for worker processing.
+`make bootstrap` starts the stack, applies migrations, and runs the GitHub startup self-check. `make qa` then runs lint, tests, and live smoke validation.
+
+### Operating the system
+
+There are two supported operator paths:
+
+- GitHub comment workflow: comment on the control repository with `@agent repo=...` or `/repo ...`
+- Chat workflow: open `http://localhost:8080/chat` and create a session for an allowed target repository
+
+Remote approvals remain GitHub-native in `gated` mode:
+
+- Comment `/approve` or `/approve <task_id>` on the control-repo issue thread
+- Comment `/reject <task_id> reason` or `/reject reason`
+- Chat executions in `gated` mode require an approval issue number so the worker knows where to post approval and status comments
 
 ### GitHub PR workflow
 
@@ -69,7 +88,7 @@ The API supports creating a draft PR from an existing run timeline:
 - `POST /runs/{run_id}/pull-request`
 - body: `{"installation_id": <int>, "branch_name": "agentic/<run>", "draft": true}`
 
-This flow uses GitHub App installation token exchange, resolves the repository default branch, creates the head branch, and opens a draft PR using run-generated PR draft metadata.
+This flow uses GitHub App installation token exchange, resolves the repository default branch, creates the head branch, commits the run artifact, and opens a draft PR using run-generated PR draft metadata.
 
 ### Control repo vs target repos
 
@@ -119,12 +138,14 @@ Example:
 
 Primary configuration is in [agentic.yaml](agentic.yaml):
 
-- `models.primary_provider`: set to `auto` (current default)
+- `models.primary_provider`: current default is `github`
 - `models.fallback_provider`: fallback model path
 - `system.allow_any_target_repository`: broad target access toggle
 - `system.allowed_target_repositories`: explicit allowlist (supports `owner/repo` or bare repo name)
 
 Current defaults are configured to allow only `predictiv` as a target repository.
+
+The current local environment is configured to use `Phi-4` via `GITHUB_MODELS_CHAT_MODEL`.
 
 ### Startup self-check
 
@@ -179,7 +200,7 @@ If `make` is unavailable, use direct Compose commands:
 
 - `docker compose up --build -d`
 - `docker compose run --rm api pytest`
-- `docker compose run --rm api ruff check src tests`
+- `docker compose run --rm api ruff check src tests scripts`
 - `docker compose run --rm -e BASE_URL=http://api:8080 api python scripts/smoke_test.py --base-url http://api:8080 --target-repository predictiv`
 
 The repository includes a `.devcontainer` configuration so VS Code can attach directly to the `api` service and use the container interpreter for analysis and testing.
@@ -188,10 +209,9 @@ The repository includes a `.devcontainer` configuration so VS Code can attach di
 
 A host Python environment is optional and only needed if container-based development is not desired.
 
-## Immediate next steps
+## Recommended next investments
 
-- add PostgreSQL-backed persistence
-- wire Redis queue and worker loop
-- implement GitHub App installation token flow
-- persist audit events and graph state
-- replace prototype retrieval with pgvector-backed hybrid search
+- Add real patch application so target-repo PRs contain source edits instead of only run artifacts
+- Execute generated validation commands in the sandbox executor before PR open
+- Reduce worker idle-log noise or make polling log verbosity configurable
+- Strengthen retrieval and knowledge-graph quality beyond the current `.py`-centric heuristics
