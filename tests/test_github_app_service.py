@@ -17,6 +17,8 @@ class _FakeResponse:
 
 
 class _FakeAsyncClient:
+    last_request: tuple[str, str, dict[str, str], dict[str, object] | None] | None = None
+
     def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
         self.requests: list[tuple[str, str, dict[str, object] | None]] = []
 
@@ -32,12 +34,22 @@ class _FakeAsyncClient:
         headers: dict[str, str],
         json: dict[str, object] | None = None,
     ):
-        _ = headers
+        self.__class__.last_request = ("POST", url, dict(headers), dict(json or {}))
         self.requests.append(("POST", url, json))
         if url.endswith("/access_tokens"):
             return _FakeResponse(201, {"token": "inst-token"})
         if url.endswith("/git/refs"):
             return _FakeResponse(201, {"ref": "refs/heads/feature/test"})
+        if url.endswith("/issues"):
+            return _FakeResponse(
+                201,
+                {
+                    "id": 21,
+                    "number": 5,
+                    "html_url": "https://github.com/acme/widgets/issues/5",
+                    "state": "open",
+                },
+            )
         if url.endswith("/pulls"):
             return _FakeResponse(
                 201,
@@ -126,3 +138,47 @@ def test_normalize_issue_comment_resolves_bare_repo_name_to_source_owner() -> No
 
     assert normalized.source_repository == "acme/control"
     assert normalized.target_repository == "acme/predictiv"
+
+
+@pytest.mark.asyncio
+async def test_create_issue_with_coding_agent_uses_user_token_and_assignment_payload(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("agentic_coder.github_app.service.httpx.AsyncClient", _FakeAsyncClient)
+    _FakeAsyncClient.last_request = None
+
+    service = GitHubAppService(
+        app_id="1",
+        private_key="test-key",
+        api_base_url="https://api.github.com",
+    )
+
+    issue = await service.create_issue_with_coding_agent(
+        "acme/widgets",
+        "ghu-test",
+        title="Improve onboarding",
+        body="Ship the onboarding refresh.",
+        base_branch="develop",
+        labels=["agentic", "agentic-dispatch"],
+        custom_instructions="Keep the first PR small.",
+        custom_agent="frontend-designer",
+        model="gpt-4.1",
+    )
+
+    assert issue["number"] == 5
+    assert _FakeAsyncClient.last_request is not None
+
+    method, url, headers, payload = _FakeAsyncClient.last_request
+    assert method == "POST"
+    assert url == "https://api.github.com/repos/acme/widgets/issues"
+    assert headers["Authorization"] == "Bearer ghu-test"
+    assert headers["GraphQL-Features"] == GitHubAppService.CODING_AGENT_FEATURES
+    assert payload["assignees"] == [GitHubAppService.CODING_AGENT_ASSIGNEE]
+    assert payload["labels"] == ["agentic", "agentic-dispatch"]
+    assert payload["agentAssignment"] == {
+        "target_repo": "acme/widgets",
+        "base_branch": "develop",
+        "custom_instructions": "Keep the first PR small.",
+        "custom_agent": "frontend-designer",
+        "model": "gpt-4.1",
+    }

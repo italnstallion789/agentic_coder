@@ -166,6 +166,23 @@ def main() -> int:
     )
     require("tasks" in runs, f"runs payload missing tasks: {runs}")
 
+    print("[smoke] preparing chat dispatch plan")
+    _response, prepared = request_json(
+        "POST",
+        f"{base_url}/chat/sessions/{session_id}/prepare",
+        headers=headers,
+        payload={},
+    )
+    require(prepared.get("ok") is True, f"prepare payload missing ok=true: {prepared}")
+    require(
+        prepared.get("backend") in {"github_coding_agent", "local_pipeline"},
+        f"unexpected chat backend in prepare response: {prepared}",
+    )
+    require(
+        isinstance(prepared.get("summary"), str) and prepared.get("summary"),
+        f"prepare response missing summary: {prepared}",
+    )
+
     print("[smoke] all checks passed")
     return 0
 

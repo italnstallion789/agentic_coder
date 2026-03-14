@@ -206,6 +206,7 @@
     }
 
     .state-awaiting_approval { color: var(--warn); }
+    .state-delegated { color: var(--accent-2); }
     .state-succeeded { color: var(--ok); }
     .state-failed, .state-cancelled { color: var(--danger); }
 
@@ -224,7 +225,7 @@
     <section class="card panel">
       <div class="stack">
         <h1 class="title">Chat Control Plane</h1>
-        <p class="sub">Enterprise intake with persistent sessions and execution traceability.</p>
+        <p class="sub">Private engineering manager for clarifying work and dispatching it to GitHub coding agent.</p>
       </div>
 
       <div class="stack">
@@ -236,13 +237,17 @@
         <input class="input mono" id="sessionRepo" placeholder="owner/repo or repo" />
       </div>
       <div class="stack">
-        <label class="sub" for="sessionApprovalIssue">Approval Issue # (optional)</label>
-        <input class="input mono" id="sessionApprovalIssue" placeholder="123" />
+        <label class="sub" for="sessionBaseBranch">Base Branch</label>
+        <input class="input mono" id="sessionBaseBranch" placeholder="develop" />
       </div>
       <div class="stack">
-        <label class="sub" for="sessionModel">Execution Model</label>
+        <label class="sub" for="sessionCustomAgent">Custom Agent (optional)</label>
+        <input class="input mono" id="sessionCustomAgent" placeholder="frontend-designer" />
+      </div>
+      <div class="stack">
+        <label class="sub" for="sessionModel">Manager Model</label>
         <select class="select" id="sessionModel"></select>
-        <div class="sub" id="modelLegend">Select the model and cost tier for this chat run.</div>
+        <div class="sub" id="modelLegend">Used for clarification and planning. GitHub-backed models are also forwarded to GitHub agent when supported.</div>
       </div>
       <div class="stack">
         <label class="sub" for="operatorId">Operator Identity</label>
@@ -263,7 +268,8 @@
           <p class="sub mono" id="activeMeta">session: —</p>
         </div>
         <div class="row">
-          <button class="btn warn" id="executeBtn">Execute To Branch + PR</button>
+          <button class="btn ghost" id="prepareBtn">Analyze Request</button>
+          <button class="btn warn" id="executeBtn">Dispatch To GitHub Agent</button>
           <button class="btn ghost" id="refreshActiveBtn">Refresh</button>
           <span class="status-pill" id="executionStatus">idle</span>
         </div>
@@ -352,6 +358,10 @@
       return provider || "unknown";
     }
 
+    function executionBackend() {
+      return window.AGENTIC_CHAT_CONFIG?.executionBackend || "github_coding_agent";
+    }
+
     function modelOptionLabel(option) {
       const label = `${providerLabel(option.provider)} - ${option.displayName} (${option.costTier})`;
       return option.recommended ? `${label} - recommended` : label;
@@ -403,7 +413,10 @@
       }
       const costMeaning =
         window.AGENTIC_CHAT_CONFIG?.costLegend?.[selected.costTier] || "Configured model tier";
-      legend.textContent = `${providerLabel(selected.provider)} / ${selected.displayName} - ${selected.costTier}: ${costMeaning}`;
+      const forwarded = selected.provider === "github"
+        ? "Forwarded to GitHub coding agent when supported."
+        : "Used locally for planning; GitHub agent uses its default model."
+      legend.textContent = `${providerLabel(selected.provider)} / ${selected.displayName} - ${selected.costTier}: ${costMeaning}. ${forwarded}`;
     }
 
     async function api(path, options = {}) {
@@ -451,7 +464,8 @@
             <button class="session-item ${active}" data-session-id="${session.session_id}">
               <div><strong>${escapeHtml(session.title)}</strong></div>
               <div class="mono sub">${escapeHtml(session.target_repository)}</div>
-              <div class="sub">approval issue: ${escapeHtml(session.approval_issue_number || "none")}</div>
+              <div class="sub">base: ${escapeHtml(session.base_branch || "default")}</div>
+              <div class="sub">custom agent: ${escapeHtml(session.custom_agent || "default")}</div>
               <div class="sub">model: ${escapeHtml(session.selected_model?.displayName || "default")} (${escapeHtml(session.selected_model?.costTier || "-")})</div>
               <div class="sub">updated ${new Date(session.updated_at).toLocaleString()}</div>
             </button>
@@ -477,13 +491,12 @@
         return;
       }
       titleEl.textContent = session.title;
-      const approval = session.approval_issue_number
-        ? ` • approval issue: #${session.approval_issue_number}`
-        : "";
+      const base = session.base_branch ? ` • base: ${session.base_branch}` : "";
+      const customAgent = session.custom_agent ? ` • agent: ${session.custom_agent}` : "";
       const model = session.selected_model
         ? ` • model: ${session.selected_model.displayName} (${session.selected_model.costTier})`
         : "";
-      metaEl.textContent = `session: ${session.session_id} • repo: ${session.target_repository}${approval}${model}`;
+      metaEl.textContent = `session: ${session.session_id} • repo: ${session.target_repository}${base}${customAgent}${model}`;
     }
 
     function renderMessages(messages) {
@@ -512,8 +525,12 @@
       root.innerHTML = tasks
         .map((task) => {
           const pr = task.pull_request || {};
+          const dispatch = task.dispatch || {};
           const prLink = pr.url
             ? `<a href="${escapeHtml(pr.url)}" target="_blank" rel="noopener">PR #${escapeHtml(pr.number)}</a>`
+            : "none";
+          const issueLink = dispatch.issue_url
+            ? `<a href="${escapeHtml(dispatch.issue_url)}" target="_blank" rel="noopener">Issue #${escapeHtml(dispatch.issue_number)}</a>`
             : "none";
           return `
             <div class="run-item">
@@ -522,6 +539,7 @@
               <div class="state-${escapeHtml(task.state)}">state: ${escapeHtml(task.state)}</div>
               <div>run: ${escapeHtml(task.run?.run_id || "n/a")} (${escapeHtml(task.run?.status || "n/a")})</div>
               <div>model: ${escapeHtml(task.run?.model_used || "n/a")}</div>
+              <div>dispatch: ${issueLink}</div>
               <div>pr: ${prLink}</div>
             </div>
           `;
@@ -551,7 +569,8 @@
       const session = activeSession();
       renderActiveHeader();
       if (!session) return;
-      document.getElementById("sessionApprovalIssue").value = session.approval_issue_number || "";
+      document.getElementById("sessionBaseBranch").value = session.base_branch || "";
+      document.getElementById("sessionCustomAgent").value = session.custom_agent || "";
       syncModelSelector(session.selected_model?.selectionKey || null);
       setStatus("loading active");
       const [messagesData, runsData] = await Promise.all([
@@ -566,14 +585,10 @@
     async function createSession() {
       const title = document.getElementById("sessionTitle").value.trim();
       const targetRepository = document.getElementById("sessionRepo").value.trim();
-      const approvalIssueRaw = document.getElementById("sessionApprovalIssue").value.trim();
-      const approvalIssue = approvalIssueRaw ? Number.parseInt(approvalIssueRaw, 10) : null;
+      const baseBranch = document.getElementById("sessionBaseBranch").value.trim();
+      const customAgent = document.getElementById("sessionCustomAgent").value.trim();
       if (!title || !targetRepository) {
         window.alert("Session title and target repository are required.");
-        return;
-      }
-      if (approvalIssueRaw && (!Number.isInteger(approvalIssue) || approvalIssue <= 0)) {
-        window.alert("Approval issue must be a positive integer.");
         return;
       }
       const selectedModel = selectedModelOption();
@@ -583,7 +598,8 @@
         body: JSON.stringify({
           title,
           target_repository: targetRepository,
-          approval_issue_number: approvalIssue,
+          base_branch: baseBranch || null,
+          custom_agent: customAgent || null,
           model_provider: selectedModel?.provider || null,
           model_name: selectedModel?.model || null,
         }),
@@ -616,29 +632,58 @@
       await refreshActiveSession();
     }
 
+    async function prepareSession() {
+      const session = activeSession();
+      if (!session) {
+        window.alert("Select a session first.");
+        return;
+      }
+      const selectedModel = selectedModelOption();
+      const baseBranch = document.getElementById("sessionBaseBranch").value.trim();
+      const customAgent = document.getElementById("sessionCustomAgent").value.trim();
+      setStatus("analyzing");
+      const result = await api(`/chat/sessions/${session.session_id}/prepare`, {
+        method: "POST",
+        body: JSON.stringify({
+          base_branch: baseBranch || null,
+          custom_agent: customAgent || null,
+          model_provider: selectedModel?.provider || null,
+          model_name: selectedModel?.model || null,
+        }),
+      });
+      setStatus(result.ready ? "ready to dispatch" : "needs clarification");
+      await refreshSessions();
+      await refreshActiveSession();
+    }
+
     async function executeSession() {
       const session = activeSession();
       if (!session) {
         window.alert("Select a session first.");
         return;
       }
-      const approvalIssueRaw = document.getElementById("sessionApprovalIssue").value.trim();
-      const approvalIssue = approvalIssueRaw ? Number.parseInt(approvalIssueRaw, 10) : null;
-      if (approvalIssueRaw && (!Number.isInteger(approvalIssue) || approvalIssue <= 0)) {
-        window.alert("Approval issue must be a positive integer.");
-        return;
-      }
       const selectedModel = selectedModelOption();
+      const baseBranch = document.getElementById("sessionBaseBranch").value.trim();
+      const customAgent = document.getElementById("sessionCustomAgent").value.trim();
       setStatus("executing");
       const result = await api(`/chat/sessions/${session.session_id}/execute`, {
         method: "POST",
         body: JSON.stringify({
-          approval_issue_number: approvalIssue,
+          base_branch: baseBranch || null,
+          custom_agent: customAgent || null,
           model_provider: selectedModel?.provider || null,
           model_name: selectedModel?.model || null,
         }),
       });
-      setStatus(result.reused ? "reused active task" : "execution enqueued");
+      if (result.clarification_required) {
+        setStatus("needs clarification");
+      } else if (result.dispatched) {
+        setStatus("dispatched to GitHub");
+      } else if (result.reused) {
+        setStatus("reused active task");
+      } else {
+        setStatus("execution complete");
+      }
       await refreshSessions();
       await refreshActiveSession();
     }
@@ -673,6 +718,13 @@
       });
     });
 
+    document.getElementById("prepareBtn").addEventListener("click", () => {
+      prepareSession().catch((error) => {
+        setStatus("error");
+        window.alert(error.message);
+      });
+    });
+
     document.getElementById("executeBtn").addEventListener("click", () => {
       executeSession().catch((error) => {
         setStatus("error");
@@ -687,6 +739,10 @@
     document.getElementById("sessionModel").addEventListener("change", () => {
       updateModelLegend();
     });
+
+    if (executionBackend() === "local_pipeline") {
+      document.getElementById("executeBtn").textContent = "Execute Local Pipeline";
+    }
 
     ensureOperator();
     syncModelSelector();

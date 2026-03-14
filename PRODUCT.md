@@ -2,11 +2,34 @@
 
 ## Overview
 
-Agentic Coder is a local-first, GitHub-native autonomous AI development platform. It runs as a self-hosted service that monitors a dedicated **control repository** on GitHub, picks up natural-language engineering tasks posted as issue comments, and autonomously plans, retrieves context, reviews, and opens draft pull requests in one or more **target repositories** — all without requiring a public webhook endpoint.
+Agentic Coder is a self-hosted AI engineering control plane.
 
-The platform is designed around a human-in-the-loop approval model: in `gated` mode (default), every proposed change waits for explicit sign-off via a GitHub comment before a PR is opened. In `autonomous` mode, the agent acts end-to-end without pausing.
+Its primary job is no longer to act as a homegrown replacement for GitHub's coding worker. The stronger product shape is:
 
-Current implementation note: the PR branch always contains a run artifact (`.agentic/runs/<run_id>.md`). When the coding proposal includes concrete file contents, those files are also written into the target-repository branch before the PR opens. If no concrete file contents are available, the PR remains artifact-only.
+- `Agentic Coder` handles intake, clarification, policy, audit trail, model routing, and operator UX
+- `GitHub Copilot coding agent` handles most implementation work
+- the local worker pipeline remains available as a fallback backend
+
+This lets you run a private remote endpoint over your own network or Tailscale while still using GitHub's native issue, branch, PR, and review flows for the actual coding work.
+
+---
+
+## Product Positioning
+
+### What the product is
+
+- private AI engineering manager
+- remote chat intake surface
+- policy and governance layer
+- run/event/task audit system
+- dispatch layer into GitHub coding agent
+- optional local execution fallback
+
+### What the product is not
+
+- a full replacement for GitHub's coding agent
+- a local clone of GitHub's implementation engine
+- a substitute for GitHub's PR review and merge UX
 
 ---
 
@@ -16,55 +39,137 @@ Current implementation note: the PR branch always contains a run artifact (`.age
 
 | Service | Role |
 |---|---|
-| `api` | FastAPI control plane — webhooks, task management, dashboard |
-| `worker` | Polling loop and task pipeline executor |
-| `executor` | Sandbox execution for running tests and shell commands |
-| `postgres` | Durable state store (tasks, runs, events, transitions, poll cursors) |
-| `redis` | Task queue between API/webhook receiver and worker |
-| `ollama` *(optional)* | Local LLM fallback (disabled by default when GitHub Models key is set) |
+| `api` | FastAPI control plane — chat, dashboard, health, self-check, task APIs |
+| `worker` | Polling loop and local-pipeline executor |
+| `executor` | Sandbox execution for local shell/test operations |
+| `postgres` | Durable state store for tasks, runs, events, cursors, sessions, and messages |
+| `redis` | Queue for local worker execution |
+| `ollama` *(optional)* | Local LLM runtime for manager/planning or local execution fallback |
 
-### High-Level Flow
+### Primary Operating Modes
 
-```
-GitHub Issue Comment
+#### 1. Chat -> GitHub coding agent (default)
+
+```text
+Remote Operator
       │
       ▼
-Worker polling loop (every N seconds)
-      │  detects command syntax (@agent, repo=, /approve, /reject)
+/chat session
+      │  create session + add messages
       ▼
-Task normalisation → PostgreSQL + Redis queue
+ChatManagerAgent
+  ├── clarifies request
+  ├── decides ready vs needs-more-info
+  └── prepares GitHub issue payload
       │
       ▼
-Worker dequeues task
+GitHub issue creation + coding-agent assignment
       │
       ▼
-TaskPipeline
-  ├── PlannerAgent        (LLM: plan objective + steps)
-  ├── ContextRetrievalAgent (index workspace .py files, keyword retrieval)
-  ├── KnowledgeGraphBuilder (file/symbol graph)
-  ├── CodingAgent         (LLM: propose files and summary)
-  ├── ReviewerAgent       (LLM: approve/reject proposal)
-  ├── SecurityAgent       (LLM + static: scan for risks)
-  ├── TestAgent           (LLM: generate validation commands)
-  └── PullRequestGenerator (LLM: write PR title + body)
+Local audit trail
+  ├── task created
+  ├── run created
+  ├── events appended
+  └── state = delegated
       │
       ▼
-[gated mode] Post approval-request comment → wait for /approve
-[autonomous mode] Proceed immediately
+GitHub coding agent executes in GitHub environment
       │
       ▼
-Create branch → commit proposed file changes + artifact → open draft PR in target repo
-      │
-      ▼
-Post status update comment on source issue
+GitHub opens PR in target repository
 ```
 
-### Current Execution Semantics
+#### 2. Chat -> local pipeline (fallback)
 
-- The pipeline generates a `PatchProposal`, review result, security result, test plan, and PR draft
-- Approval and status comments are posted back to the control-repository issue when issue context is present
-- Target-repository PRs always contain a run artifact and may also contain model-proposed file changes
-- Direct patch application currently depends on the coding agent returning full file contents for files already present in retrieved context
+```text
+Remote Operator
+      │
+      ▼
+/chat session
+      │
+      ▼
+Task creation + Redis enqueue
+      │
+      ▼
+Local worker executes TaskPipeline
+      │
+      ▼
+Branch creation + file writes + draft PR
+```
+
+#### 3. GitHub comment -> local pipeline
+
+```text
+GitHub issue comment in control repository
+      │
+      ▼
+Worker polling loop
+      │ detects @agent / repo= / /repo / /approve / /reject
+      ▼
+Task normalization -> PostgreSQL + Redis
+      │
+      ▼
+Local worker executes TaskPipeline
+```
+
+---
+
+## Core Concepts
+
+### Chat Control Plane
+
+The `/chat` UI is the main operator surface.
+
+It supports:
+
+- persistent sessions
+- ordered message history
+- target repository selection
+- base branch override
+- custom agent name
+- manager-model selection
+- clarification before dispatch
+- run history per session
+
+### Manager Model
+
+The selected model in `/chat` is used by Agentic Coder for:
+
+- clarification
+- request shaping
+- dispatch planning
+- issue body generation
+
+Model cost labels shown in the UI:
+
+- `0x`: no premium Copilot token charge for the manager model
+- `1x`: premium Copilot token charge for the manager model
+- `local`: runs through Ollama locally
+
+These labels apply to the manager model only. GitHub coding-agent execution still carries GitHub-side cost for Actions minutes and Copilot premium requests.
+
+### Execution Backend
+
+Configured in `agentic.yaml`:
+
+```yaml
+chat:
+  execution_backend: github_coding_agent   # github_coding_agent | local_pipeline
+  auto_prepare: true
+```
+
+- `github_coding_agent` is the default and recommended mode
+- `local_pipeline` is the fallback self-hosted execution mode
+
+### Delegated State
+
+A delegated task is a task that Agentic Coder prepared and handed off to GitHub coding agent.
+
+`delegated` means:
+
+- a local audit record exists
+- the request was successfully dispatched
+- implementation is now happening outside the local worker
 
 ---
 
@@ -72,204 +177,97 @@ Post status update comment on source issue
 
 ### Task States
 
-```
-RECEIVED → NORMALIZED → INDEXED → PLANNED → AWAITING_APPROVAL → READY → RUNNING → SUCCEEDED
-                                          ↘ (autonomous mode) ↗               ↘ FAILED
-                                                                                ↘ CANCELLED
+```text
+RECEIVED -> NORMALIZED -> INDEXED -> PLANNED -> AWAITING_APPROVAL -> READY -> RUNNING -> SUCCEEDED
+                                          \ (autonomous mode)    /               \ FAILED
+
+Chat dispatch path:
+RECEIVED -> NORMALIZED -> PLANNED -> RUNNING -> DELEGATED
 ```
 
 | State | Meaning |
 |---|---|
-| `received` | Task created from webhook or poll |
+| `received` | Task created from webhook, poll, or chat dispatch audit |
 | `normalized` | Payload extracted and validated |
-| `indexed` | Workspace and context indexed |
-| `planned` | Pipeline has produced a plan |
-| `awaiting_approval` | Gated mode: waiting for human `/approve` |
-| `ready` | Approved or autonomous — ready to execute |
-| `running` | Pipeline actively running |
-| `succeeded` | PR created successfully |
-| `failed` | Pipeline or PR creation error |
+| `indexed` | Local pipeline context indexed |
+| `planned` | Local plan or dispatch plan prepared |
+| `awaiting_approval` | Local gated flow waiting for human `/approve` |
+| `ready` | Approved or autonomous local task |
+| `running` | Local worker or dispatch audit currently executing |
+| `delegated` | Handed off to GitHub coding agent |
+| `succeeded` | Local pipeline completed successfully |
+| `failed` | Local pipeline or dispatch failed |
 | `cancelled` | Rejected or manually cancelled |
 
 ### Database Tables
 
 | Table | Purpose |
 |---|---|
-| `tasks` | One row per task; holds payload JSONB and current state |
-| `runs` | One run per task execution; holds metadata and status |
-| `task_transitions` | Append-only log of every state change with reason and details |
-| `run_events` | Granular event timeline per run (plan_created, proposal_generated, pr_draft, etc.) |
-| `poll_cursors` | Durable per-repo polling position (last `updated_at` seen) |
-| `chat_sessions` | Persistent remote-operator chat sessions bound to target repositories |
-| `chat_messages` | Ordered transcript messages stored for each chat session |
+| `tasks` | One row per task with payload JSON and current state |
+| `runs` | One row per execution or dispatch audit |
+| `task_transitions` | Append-only state transition log |
+| `run_events` | Event timeline for planning, dispatch, PR creation, and approvals |
+| `poll_cursors` | Durable per-repo polling position |
+| `chat_sessions` | Persistent operator sessions |
+| `chat_messages` | Ordered transcript for each session |
 
 ---
 
-## Agent Pipeline
+## Local Pipeline
 
-All agents receive the same `ModelProvider` instance resolved at pipeline init. Each agent has a model-backed implementation and a stub fallback used when the model call fails or no provider is configured.
+The local pipeline still exists and remains useful for fallback or self-hosted-only scenarios.
 
-### PlannerAgent
-- **Input:** issue title + body
-- **Output:** `PlanResult` — objective string + ordered list of implementation steps
-- **Model prompt:** produces JSON `{objective, steps}`
+### Agents
 
-### ContextRetrievalAgent
-- **Input:** workspace root path
-- **Output:** list of `RetrievalDocument` (ranked by keyword overlap with query)
-- **No LLM** — indexes all `.py` files in workspace, keyword-scores against query terms
+- `PlannerAgent`
+- `ContextRetrievalAgent`
+- `KnowledgeGraphBuilder`
+- `CodingAgent`
+- `ReviewerAgent`
+- `SecurityAgent`
+- `TestAgent`
+- `PullRequestGenerator`
 
-### KnowledgeGraphBuilder
-- **Input:** workspace root
-- **Output:** `{nodes, edges}` summary counts
-- **No LLM** — walks directory tree, builds file/symbol graph nodes
+### Current semantics
 
-### CodingAgent
-- **Input:** `PlanResult` + context documents + repository name
-- **Output:** `PatchProposal` — summary of changes + list of target file paths + optional full-file updates
-- **Model prompt:** produces JSON `{summary, target_files, file_changes}` constrained to files present in context
-
-### ReviewerAgent
-- **Input:** `PatchProposal`
-- **Output:** `ReviewResult` — approved bool + feedback string
-- **Model prompt:** produces JSON `{approved, feedback}`
-
-### SecurityAgent
-- **Input:** issue/comment body text
-- **Output:** `SecurityResult` — passed bool + findings list
-- **Dual check:** static marker scan (rm -rf, drop table, disable auth) AND model scan; fails if either fails; findings are merged
-
-### TestAgent
-- **Input:** `PlanResult` + `PatchProposal`
-- **Output:** `ExecutionTestPlan` — ordered list of shell commands
-- **Model prompt:** produces JSON `{commands}` targeted to affected files
-
-### PullRequestGenerator
-- **Input:** repo name + `PlanResult` + `PatchProposal`
-- **Output:** `PullRequestDraft` — title + markdown body
-- **Model prompt:** produces JSON `{title, body}` with sections: Summary, Changes, Testing
+- the pipeline can produce proposed file changes when the proposal includes concrete full-file content
+- the local PR flow still writes `.agentic/runs/<run_id>.md`
+- local patch application is constrained by proposal quality and available retrieved context
 
 ---
 
-## Model Configuration
+## GitHub Dispatch Integration
 
-### Provider Abstraction
+### Required credentials
 
-All LLM calls go through `ModelProvider` → `ModelRouter`. Two providers are implemented:
+Two different GitHub credential paths are involved:
 
-| Provider | Class | Endpoint |
-|---|---|---|
-| GitHub Models (Copilot) | `GitHubHostedProvider` | `https://models.inference.ai.azure.com` |
-| Ollama (local) | `OllamaProvider` | `http://ollama:11434` |
+1. `GitHub App credentials`
+   - used for repo integration, polling, comments, branch work, and local PR operations
+2. `GITHUB_AGENT_USER_TOKEN`
+   - used for issue creation that assigns GitHub coding agent in the target repository
 
-Provider selection is controlled by `agentic.yaml`:
+### Dispatch behavior
 
-```yaml
-models:
-  primary_provider: github   # github | ollama | auto
-  fallback_provider: null    # null to disable fallback
-  embedding_provider: github
-```
+When the chat backend is `github_coding_agent` and the request is ready:
 
-`auto` prefers GitHub if `GITHUB_MODELS_API_KEY` is set, otherwise falls back to Ollama.
+1. Agentic Coder prepares the issue title, issue body, and custom instructions.
+2. It creates a GitHub issue in the target repository.
+3. It assigns `copilot-swe-agent[bot]`.
+4. It records local events such as:
+   - `dispatch_prepared`
+   - `github_agent_issue_created`
+   - `github_agent_dispatched`
+5. It marks the task `delegated`.
 
-### Current Model
+### Installation context separation
 
-| Setting | Value |
-|---|---|
-| Provider | GitHub Models (Copilot) |
-| Model | `Phi-4` |
-| Reason | Best free-tier model for software development tasks — optimised for code reasoning |
-| Auth | Classic PAT (`ghp_...`) with active Copilot subscription |
+Local tasks may carry both:
 
-### Changing the Model
+- `source_installation_id`
+- `target_installation_id`
 
-Set `GITHUB_MODELS_CHAT_MODEL` in `.env`:
-
-```
-GITHUB_MODELS_CHAT_MODEL=Phi-4
-```
-
-Free-tier (0x) models available:
-
-| Model | Name |
-|---|---|
-| Phi-4 *(current — recommended for code)* | `Phi-4` |
-| Phi-4 mini | `Phi-4-mini` |
-| GPT-4.1 mini | `gpt-4.1-mini` |
-| GPT-4o mini | `gpt-4o-mini` |
-| Meta Llama 3.3 70B | `Meta-Llama-3.3-70B-Instruct` |
-
-Premium models (consume Copilot quota):
-
-| Model | Name |
-|---|---|
-| GPT-4.1 | `gpt-4.1` |
-| Claude 3.7 Sonnet | `claude-3-7-sonnet` |
-
----
-
-## Policy Configuration (`agentic.yaml`)
-
-```yaml
-version: 1
-
-system:
-  name: agentic-coder
-  environment: development
-  control_repository: owner/agentic_coder      # repo the agent polls for commands
-  allow_any_target_repository: false           # must be false in production
-  allowed_target_repositories:
-    - myorg/myrepo                             # explicitly allowed targets
-  local_repository_paths:
-    myrepo: /repos/myrepo                      # workspace path inside container
-  default_target_base_branch: develop
-  target_base_branches:
-    myorg/myrepo: develop
-
-autonomy:
-  mode: gated                                  # gated (requires /approve) | autonomous
-  allowed_actions:
-    - plan
-    - retrieve_context
-    - build_knowledge_graph
-    - write_patch
-    - run_tests
-    - create_pr
-  approval_required_actions:
-    - execute_shell
-    - merge_pr
-    - enable_network
-
-sandbox:
-  profile: compose
-  network_enabled: false
-  network_allowlist: []
-  max_runtime_seconds: 900
-  max_cpu_cores: 2
-  max_memory_mb: 2048
-
-models:
-  primary_provider: github
-  fallback_provider: null
-  embedding_provider: github
-
-trigger:
-  mode: polling                                # polling | webhook | hybrid
-  poll_interval_seconds: 60
-  max_items_per_poll: 50
-
-knowledge_graph:
-  enabled: true
-  storage: postgres
-  node_types: [repo, commit, file, symbol, test, issue, pr, task, artifact, decision]
-  edge_types: [contains, imports, defines, references, calls, changes, mentions, derived_from, related_to]
-
-budgets:
-  max_prompt_tokens: 32000
-  max_completion_tokens: 8000
-  max_parallel_candidates: 1
-```
+This prevents cross-repo confusion when the control repository and target repository differ.
 
 ---
 
@@ -277,110 +275,56 @@ budgets:
 
 ### Polling (default)
 
-- Worker polls `system.control_repository` issue comments on a timer
-- No public webhook endpoint required — works behind NAT/firewall
-- Durable cursor stored in `poll_cursors` table — survives restarts
-- Bot comments automatically filtered out to prevent feedback loops
+- worker polls `system.control_repository`
+- no public webhook endpoint required
+- bot comments are filtered out
+- durable cursor stored in `poll_cursors`
 
 ### Webhook
 
-- API receives `POST /webhook` with GitHub `X-Hub-Signature-256` verification
-- HMAC-SHA256 validation using `GITHUB_WEBHOOK_SECRET`
-- Immediately enqueues task to Redis
+- API receives `POST /github/webhook`
+- validates `X-Hub-Signature-256`
+- immediately enqueues local tasks
 
 ### Hybrid
 
-- Both polling and webhook active simultaneously
-
----
-
-## Chat Control Plane (Enterprise Intake)
-
-The platform now includes a first-class chat intake UI at `GET /chat` for remote operation.
-
-- Persistent chat sessions are stored in PostgreSQL (`chat_sessions`, `chat_messages`)
-- Each session is bound to an allowed target repository
-- Operator identity is carried on each write via `X-Operator`
-- The page prompts for `X-Admin-Token` when `API_ADMIN_TOKEN` is configured
-- The page includes a runtime-backed model selector so operators can choose the execution model per session/run
-- GitHub-hosted model options are labeled with Copilot cost tiers: `0x` and `1x`
-- Session execution enqueues a normal task into the same pipeline and queue
-- Session transcripts are converted into task payloads with full run traceability
-
-### Gated Mode with Chat
-
-In `gated` autonomy mode, chat execution requires a GitHub approval issue number so approvals remain remote and GitHub-native:
-
-- Set `approval_issue_number` on session create, or pass it during execute
-- Worker posts approval-request/status comments to the control repository issue
-- `/approve` and `/reject` comments continue to drive transitions and PR creation
-- The resulting PR always contains a run artifact and may also contain model-proposed file updates when available
-
-### Installation Context Separation
-
-Task payloads carry both installation contexts:
-
-- `source_installation_id` for source/control repo issue comments + labels
-- `target_installation_id` for branch/commit/PR operations in target repo
-
-This prevents cross-repo token misuse when source and target repos are not under the same installation.
+- polling and webhook enabled together
 
 ---
 
 ## Command Syntax (GitHub Comments)
 
-### Triggering a Task
+### Triggering a local task
 
-```
+```text
 @agent repo=owner/reponame
 Description of the change to make
 ```
 
-```
+```text
 /repo owner/reponame
 Description of the change to make
 ```
 
-```
-@agent repo=reponame add a health check endpoint
-```
+### Approving a local gated task
 
-### Approving a Task (gated mode)
-
-```
+```text
 /approve
 ```
-Approves the latest `awaiting_approval` task on this issue.
 
-```
+```text
 /approve <task_id>
 /approve task=<task_id>
 ```
-Approves a specific task by ID.
 
-### Rejecting a Task
+### Rejecting a local gated task
 
-```
+```text
 /reject reason goes here
 /reject <task_id> reason goes here
 ```
 
----
-
-## GitHub App Requirements
-
-### Required Permissions
-
-| Permission | Level |
-|---|---|
-| Metadata | Read |
-| Contents | Read & Write |
-| Pull requests | Read & Write |
-| Issues | Read & Write |
-
-### Required Events (webhook mode)
-
-- `issue_comment`
+These approval commands apply to the local worker pipeline. They are not required for the default GitHub-agent chat dispatch flow.
 
 ---
 
@@ -389,27 +333,31 @@ Approves a specific task by ID.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/healthz` | Liveness probe |
-| `GET` | `/readyz` | Readiness probe (DB + Redis) |
-| `GET` | `/self-check` | Full startup diagnostics |
-| `POST` | `/webhook` | GitHub App webhook receiver |
-| `POST` | `/tasks` | Create task manually |
+| `GET` | `/readyz` | Readiness probe |
+| `GET` | `/self-check` | Startup diagnostics alias |
+| `GET` | `/startup/self-check` | Current startup self-check result |
+| `POST` | `/startup/self-check/run` | Re-run GitHub self-check |
+| `GET` | `/polling/status` | Polling configuration and cursor state |
+| `POST` | `/github/webhook` | GitHub webhook receiver |
+| `POST` | `/tasks` | Create a task manually |
 | `GET` | `/tasks` | List recent tasks |
 | `GET` | `/tasks/{task_id}` | Task detail |
-| `POST` | `/tasks/{task_id}/approve` | Approve a gated task |
-| `POST` | `/tasks/{task_id}/reject` | Reject a task |
+| `POST` | `/tasks/{task_id}/approve` | Approve a local gated task |
+| `POST` | `/tasks/{task_id}/reject` | Reject a local gated task |
 | `GET` | `/runs/{run_id}` | Run detail |
 | `GET` | `/runs/{run_id}/events` | Run event timeline |
-| `POST` | `/runs/{run_id}/pull-request` | Manually trigger PR creation for a run |
+| `POST` | `/runs/{run_id}/pull-request` | Manually trigger local PR creation |
 | `GET` | `/dashboard` | HTML dashboard UI |
 | `GET` | `/dashboard/data` | Dashboard JSON data |
 | `GET` | `/chat` | Chat control-plane UI |
-| `POST` | `/chat/sessions` | Create chat session |
-| `GET` | `/chat/sessions` | List chat sessions |
-| `GET` | `/chat/sessions/{session_id}` | Chat session detail |
-| `GET` | `/chat/sessions/{session_id}/messages` | Chat transcript messages |
-| `POST` | `/chat/sessions/{session_id}/messages` | Append chat message |
-| `GET` | `/chat/sessions/{session_id}/runs` | Task/run history for session |
-| `POST` | `/chat/sessions/{session_id}/execute` | Enqueue chat session as pipeline task |
+| `POST` | `/chat/sessions` | Create a chat session |
+| `GET` | `/chat/sessions` | List sessions |
+| `GET` | `/chat/sessions/{session_id}` | Session detail |
+| `GET` | `/chat/sessions/{session_id}/messages` | Session transcript |
+| `POST` | `/chat/sessions/{session_id}/messages` | Append message |
+| `GET` | `/chat/sessions/{session_id}/runs` | Local audit trail for session |
+| `POST` | `/chat/sessions/{session_id}/prepare` | Clarify and prepare dispatch |
+| `POST` | `/chat/sessions/{session_id}/execute` | Dispatch to GitHub agent or queue local pipeline |
 
 ---
 
@@ -417,35 +365,26 @@ Approves a specific task by ID.
 
 Available at `http://localhost:8080/dashboard`.
 
-Displays per-task:
-- Request title, body, and sender
-- Source (control) and target repository
-- Current task state and run status
-- PR draft title and opened PR link (once created)
-- Model used for the run
-- Polling mode and last poll timestamp
+Displays:
+
+- autonomy mode
+- polling status
+- model runtime
+- chat execution backend
+- task state
+- run status
+- delegated GitHub issue link when applicable
+- PR link when applicable
 
 ---
 
 ## Security Controls
 
-### Cross-Repo Path Leak Detection
-
-If the agent proposes edits to files belonging to the control/source repository instead of the target repository, the task is immediately failed with event `proposal_target_mismatch`. This prevents the agent from accidentally modifying its own codebase.
-
-### Bot Comment Filtering
-
-All comments from GitHub App bots (`[bot]` suffix or `type: Bot`) are skipped during polling to prevent infinite approval loops.
-
-### Policy Enforcement
-
-- `allow_any_target_repository: false` — explicit allowlist required
-- `approval_required_actions` — shell execution and PR merging always require human approval regardless of autonomy mode
-- `network_enabled: false` — sandbox network disabled by default
-
-### Webhook Security
-
-All incoming webhooks are validated with HMAC-SHA256 using `GITHUB_WEBHOOK_SECRET` before any processing.
+- `allow_any_target_repository: false` keeps target repos allowlisted by default
+- GitHub bot comments are ignored during polling to prevent feedback loops
+- webhook requests are HMAC-validated with `GITHUB_WEBHOOK_SECRET`
+- local local-pipeline path still checks for cross-repo path mismatch before PR creation
+- admin-protected routes can be gated with `API_ADMIN_TOKEN`
 
 ---
 
@@ -454,21 +393,22 @@ All incoming webhooks are validated with HMAC-SHA256 using `GITHUB_WEBHOOK_SECRE
 | Variable | Default | Description |
 |---|---|---|
 | `APP_ENV` | `development` | Environment name |
-| `API_ADMIN_TOKEN` | — | Optional admin token for privileged API routes |
+| `API_ADMIN_TOKEN` | — | Optional API/UI admin token |
 | `GITHUB_APP_ID` | — | GitHub App numeric ID |
 | `GITHUB_WEBHOOK_SECRET` | — | HMAC secret for webhook verification |
-| `GITHUB_PRIVATE_KEY` | — | PEM private key (inline) |
-| `GITHUB_PRIVATE_KEY_PATH` | — | Path to PEM file (alternative to inline) |
+| `GITHUB_PRIVATE_KEY` | — | Inline PEM private key |
+| `GITHUB_PRIVATE_KEY_PATH` | — | Path to PEM private key |
 | `GITHUB_API_BASE_URL` | `https://api.github.com` | GitHub API base |
-| `GITHUB_MODELS_API_KEY` | — | Classic PAT with Copilot subscription |
+| `GITHUB_AGENT_USER_TOKEN` | — | User token used for GitHub coding-agent issue dispatch |
+| `GITHUB_MODELS_API_KEY` | — | GitHub Models API key for manager-model calls |
 | `GITHUB_MODELS_BASE_URL` | `https://models.inference.ai.azure.com` | GitHub Models endpoint |
-| `GITHUB_MODELS_CHAT_MODEL` | `gpt-4.1-mini` | Model name (override in .env) |
+| `GITHUB_MODELS_CHAT_MODEL` | `gpt-4.1-mini` | Default GitHub manager model |
 | `DATABASE_URL` | `postgresql+psycopg://...` | PostgreSQL connection string |
 | `REDIS_URL` | `redis://redis:6379/0` | Redis connection string |
-| `QUEUE_NAME` | `agentic:tasks` | Redis list key for task queue |
-| `OLLAMA_BASE_URL` | `http://ollama:11434` | Ollama endpoint (if enabled) |
-| `OLLAMA_CHAT_MODEL` | `llama3.1:8b` | Ollama model (if enabled) |
-| `MODEL_REQUEST_TIMEOUT_SECONDS` | `40.0` | Per-request LLM timeout |
+| `QUEUE_NAME` | `agentic:tasks` | Redis queue key |
+| `OLLAMA_BASE_URL` | `http://ollama:11434` | Ollama endpoint |
+| `OLLAMA_CHAT_MODEL` | `llama3.1:8b` | Default local manager model |
+| `MODEL_REQUEST_TIMEOUT_SECONDS` | `40.0` | Per-request model timeout |
 
 ---
 
@@ -477,31 +417,33 @@ All incoming webhooks are validated with HMAC-SHA256 using `GITHUB_WEBHOOK_SECRE
 ### Quick Start
 
 ```bash
-make bootstrap   # start stack + run migrations + self-check
-make test        # run pytest in container
-make logs        # stream all service logs
-make lint        # ruff linting
+make bootstrap
+make qa
 ```
 
-### Running Tests Locally
+### Validation
 
 ```bash
-pip install -e ".[dev]"
-python -m pytest tests/ -q
+make test-regression
+make smoke
+make qa
 ```
 
 ### Migrations
 
 ```bash
-make migrate                                      # apply pending migrations
-alembic revision --autogenerate -m "description" # generate new migration
+make migrate
+alembic revision --autogenerate -m "description"
 ```
 
-### Adding a New Agent
+### Product guidance
 
-1. Create `src/agentic_coder/agents/my_agent.py` with a result dataclass and agent class
-2. Accept `model: ModelProvider | None = None` in `__init__`
-3. Implement `_*_with_model()` and `_*_stub()` methods
-4. Add result field to `PipelineResult` dataclass in `orchestration/pipeline.py`
-5. Instantiate the agent in `TaskPipeline.__init__` passing `_model`
-6. Call it in `TaskPipeline.run()`
+The highest-leverage future work is now in:
+
+- stronger clarification and planning loops
+- richer product memory and cross-session context
+- better GitHub-agent dispatch tracking and status sync
+- multi-repo orchestration
+- policy-driven routing across GitHub agent, local models, and local execution
+
+The lowest-leverage future work is trying to outbuild GitHub's implementation engine inside this repo.

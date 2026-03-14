@@ -384,6 +384,7 @@ class TaskRepository:
 
     def get_active_chat_task(self, *, session_id: str) -> TaskRecord | None:
         terminal_states = (
+            TaskState.DELEGATED.value,
             TaskState.SUCCEEDED.value,
             TaskState.FAILED.value,
             TaskState.CANCELLED.value,

@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import re
 from contextlib import asynccontextmanager
@@ -11,6 +12,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
+from agentic_coder.agents.chat_manager import ChatManagerAgent, DispatchPlan
 from agentic_coder.config import get_settings
 from agentic_coder.db.repositories import TaskRepository
 from agentic_coder.db.session import create_session_factory
@@ -22,6 +24,7 @@ from agentic_coder.models.catalog import (
     default_chat_model_selection,
     find_chat_model_option,
 )
+from agentic_coder.models.providers import GitHubHostedProvider, ModelProvider, OllamaProvider
 from agentic_coder.policy.loader import PolicyLoader, resolve_policy_path
 from agentic_coder.pull_requests import apply_pull_request_changes, extract_proposed_file_changes
 from agentic_coder.queue.redis_queue import RedisTaskQueue
@@ -92,6 +95,8 @@ class CreateChatSessionRequest(BaseModel):
     title: str = Field(min_length=1, max_length=256)
     target_repository: str = Field(min_length=1, max_length=256)
     approval_issue_number: int | None = Field(default=None, ge=1)
+    base_branch: str | None = Field(default=None, min_length=1, max_length=256)
+    custom_agent: str | None = Field(default=None, min_length=1, max_length=256)
     model_provider: Literal["github", "ollama"] | None = None
     model_name: str | None = Field(default=None, min_length=1, max_length=256)
     metadata: dict[str, object] = Field(default_factory=dict)
@@ -109,6 +114,17 @@ class ExecuteChatSessionRequest(BaseModel):
     include_transcript_limit: int = Field(default=40, ge=1, le=200)
     force_new: bool = False
     approval_issue_number: int | None = Field(default=None, ge=1)
+    base_branch: str | None = Field(default=None, min_length=1, max_length=256)
+    custom_agent: str | None = Field(default=None, min_length=1, max_length=256)
+    model_provider: Literal["github", "ollama"] | None = None
+    model_name: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+class PrepareChatSessionRequest(BaseModel):
+    include_transcript_limit: int = Field(default=40, ge=1, le=200)
+    target_repository: str | None = Field(default=None, max_length=256)
+    base_branch: str | None = Field(default=None, min_length=1, max_length=256)
+    custom_agent: str | None = Field(default=None, min_length=1, max_length=256)
     model_provider: Literal["github", "ollama"] | None = None
     model_name: str | None = Field(default=None, min_length=1, max_length=256)
 
@@ -241,6 +257,8 @@ def serialize_chat_session_response(
     return {
         **chat_session,
         "approval_issue_number": parse_positive_int(metadata.get("approval_issue_number")),
+        "base_branch": str(metadata.get("base_branch") or "").strip() or None,
+        "custom_agent": str(metadata.get("custom_agent") or "").strip() or None,
         "selected_model": serialize_chat_model_selection(
             settings=settings,
             metadata=metadata,
@@ -249,6 +267,73 @@ def serialize_chat_session_response(
         "created_at": chat_session["created_at"].isoformat(),
         "updated_at": chat_session["updated_at"].isoformat(),
     }
+
+
+def resolve_chat_execution_backend(policy: object) -> str:
+    chat_policy = getattr(policy, "chat", None)
+    return str(getattr(chat_policy, "execution_backend", "github_coding_agent") or "")
+
+
+def build_chat_manager_provider(
+    *,
+    settings: object,
+    selection: dict[str, object] | None,
+) -> ModelProvider | None:
+    selected_provider = str((selection or {}).get("provider") or "").strip()
+    selected_model = str((selection or {}).get("model") or "").strip()
+    if selected_provider == "github":
+        if not getattr(settings, "github_models_api_key", ""):
+            return None
+        return GitHubHostedProvider(
+            api_key=settings.github_models_api_key,
+            model=selected_model or settings.github_models_chat_model,
+            base_url=settings.github_models_base_url,
+            timeout_seconds=settings.model_request_timeout_seconds,
+        )
+    if selected_provider == "ollama":
+        return OllamaProvider(
+            model=selected_model or settings.ollama_chat_model,
+            base_url=settings.ollama_base_url,
+            timeout_seconds=settings.model_request_timeout_seconds,
+        )
+    return None
+
+
+def build_dispatch_question_message(plan: DispatchPlan) -> str:
+    questions = "\n".join(f"- {item}" for item in plan.clarification_questions)
+    return (
+        "I need a bit more direction before I dispatch this to GitHub coding agent.\n\n"
+        f"{questions}"
+    )
+
+
+def build_dispatch_ready_message(
+    *,
+    plan: DispatchPlan,
+    target_repository: str,
+    base_branch: str,
+    selected_model: dict[str, object] | None,
+) -> str:
+    lines = [
+        f"Ready to dispatch to GitHub coding agent for `{target_repository}`.",
+        f"Base branch: `{base_branch}`.",
+        f"Summary: {plan.summary}",
+    ]
+    if selected_model is not None:
+        lines.append(
+            "Manager model: "
+            f"{selected_model.get('displayName')} ({selected_model.get('costTier')})."
+        )
+        if selected_model.get("provider") == "github":
+            lines.append(
+                "This GitHub-backed model selection will also be forwarded to the coding agent."
+            )
+        else:
+            lines.append(
+                "This local model is used for planning/clarification; GitHub agent will use its "
+                "default execution model."
+            )
+    return "\n".join(lines)
 
 
 def build_chat_transcript(
@@ -265,6 +350,280 @@ def build_chat_transcript(
             continue
         lines.append(f"[{role}] {content}")
     return "\n".join(lines)
+
+
+def build_github_agent_issue_body(
+    *,
+    transcript: str,
+    prepared_body: str,
+    target_repository: str,
+    base_branch: str,
+) -> str:
+    sections = [prepared_body.strip()]
+    sections.append(
+        "## Dispatch Metadata\n"
+        f"- Target repository: `{target_repository}`\n"
+        f"- Base branch: `{base_branch}`\n"
+    )
+    sections.append(f"## Chat Transcript\n```text\n{transcript.strip()}\n```")
+    return "\n\n".join(section for section in sections if section.strip())
+
+
+def build_chat_dispatch_payload(
+    *,
+    session_id: str,
+    task_title: str,
+    transcript: str,
+    operator: str,
+    target_repository: str,
+    source_repository: str,
+    base_branch: str,
+    selected_model: dict[str, object] | None,
+    dispatch_plan: DispatchPlan,
+    issue_number: int,
+    issue_url: str,
+    issue_labels: list[str],
+) -> dict[str, object]:
+    return {
+        "event_name": "chat_github_agent_dispatch",
+        "source_repository": source_repository or "chat-ui",
+        "repository": target_repository,
+        "title": task_title,
+        "body": transcript,
+        "sender": operator,
+        "chat_session_id": session_id,
+        "chat_message_count": len(transcript.splitlines()),
+        "requested_at": datetime.now(UTC).isoformat(),
+        "dispatch_backend": "github_coding_agent",
+        "dispatch_issue_number": issue_number,
+        "dispatch_issue_url": issue_url,
+        "dispatch_base_branch": base_branch,
+        "dispatch_summary": dispatch_plan.summary,
+        "dispatch_labels": issue_labels,
+        "dispatch_model": (selected_model or {}).get("model"),
+        "dispatch_model_provider": (selected_model or {}).get("provider"),
+        "dispatch_model_cost_tier": (selected_model or {}).get("costTier"),
+    }
+
+
+def create_dispatch_audit_record(
+    *,
+    repo: TaskRepository,
+    task_title: str,
+    payload: dict[str, object],
+    dispatch_plan: DispatchPlan,
+    issue_number: int,
+    issue_url: str,
+    target_repository: str,
+    base_branch: str,
+    selected_model: dict[str, object] | None,
+) -> tuple[str, str]:
+    task = repo.create(title=task_title, payload=payload)
+    run_id = repo.create_run(task.task_id, worker_name="github-coding-agent-dispatch")
+    repo.update_state(
+        task.task_id,
+        TaskState.NORMALIZED,
+        run_id=run_id,
+        reason="chat_dispatch_normalized",
+    )
+    repo.update_state(
+        task.task_id,
+        TaskState.PLANNED,
+        run_id=run_id,
+        reason="chat_dispatch_prepared",
+    )
+    repo.update_state(
+        task.task_id,
+        TaskState.RUNNING,
+        run_id=run_id,
+        reason="chat_dispatch_running",
+    )
+    repo.append_run_event(
+        run_id,
+        "dispatch_prepared",
+        {
+            "summary": dispatch_plan.summary,
+            "issue_title": dispatch_plan.issue_title,
+            "clarification_questions": dispatch_plan.clarification_questions,
+        },
+    )
+    repo.append_run_event(
+        run_id,
+        "github_agent_issue_created",
+        {
+            "issue_number": issue_number,
+            "issue_url": issue_url,
+            "repository": target_repository,
+        },
+    )
+    repo.append_run_event(
+        run_id,
+        "github_agent_dispatched",
+        {
+            "repository": target_repository,
+            "issue_number": issue_number,
+            "issue_url": issue_url,
+            "base_branch": base_branch,
+            "model": (selected_model or {}).get("model"),
+            "model_provider": (selected_model or {}).get("provider"),
+            "model_cost_tier": (selected_model or {}).get("costTier"),
+        },
+    )
+    repo.update_run_metadata(
+        run_id,
+        {
+            "dispatch_backend": "github_coding_agent",
+            "dispatch_issue_number": issue_number,
+            "dispatch_issue_url": issue_url,
+            "dispatch_summary": dispatch_plan.summary,
+            "model_used": (
+                f"{selected_model['provider']}:{selected_model['model']}"
+                if selected_model is not None
+                else None
+            ),
+        },
+    )
+    repo.update_state(
+        task.task_id,
+        TaskState.DELEGATED,
+        run_id=run_id,
+        reason="github_coding_agent_dispatched",
+        details={
+            "issue_number": issue_number,
+            "issue_url": issue_url,
+            "repository": target_repository,
+        },
+    )
+    repo.complete_run(run_id, status="succeeded")
+    return task.task_id, run_id
+
+
+async def prepare_chat_dispatch_plan(
+    *,
+    session_id: str,
+    request_body: PrepareChatSessionRequest | ExecuteChatSessionRequest,
+    persist_message: bool,
+) -> dict[str, object]:
+    settings = get_settings()
+    _, policy = load_policy()
+    session_factory = create_session_factory()
+
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        chat_session = repo.get_chat_session(session_id)
+        if chat_session is None:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+
+        target_repository = str(
+            request_body.target_repository or chat_session["target_repository"]
+        ).strip()
+        if not target_repository:
+            raise HTTPException(status_code=400, detail="Target repository is required")
+
+        target_repository = expand_target_repository(policy, target_repository)
+        if not is_target_repository_allowed(policy, target_repository):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Target repository not allowed: {target_repository}",
+            )
+
+        messages = repo.list_chat_messages(
+            session_id=session_id,
+            limit=request_body.include_transcript_limit,
+        )
+        if not messages:
+            raise HTTPException(status_code=400, detail="Chat session has no messages")
+
+    metadata = dict(chat_session.get("metadata") or {})
+    selected_model = validate_chat_model_selection(
+        settings=settings,
+        provider=request_body.model_provider,
+        model=request_body.model_name,
+    ) or serialize_chat_model_selection(
+        settings=settings,
+        metadata=metadata,
+        policy=policy,
+    )
+    if selected_model is not None:
+        metadata["model_selection"] = {
+            "provider": selected_model["provider"],
+            "model": selected_model["model"],
+        }
+
+    base_branch = str(
+        request_body.base_branch
+        or metadata.get("base_branch")
+        or resolve_base_branch_for_repository(policy, target_repository)
+    ).strip()
+    custom_agent = str(request_body.custom_agent or metadata.get("custom_agent") or "").strip()
+    metadata["base_branch"] = base_branch
+    if custom_agent:
+        metadata["custom_agent"] = custom_agent
+    elif "custom_agent" in metadata:
+        metadata.pop("custom_agent", None)
+
+    transcript = build_chat_transcript(
+        messages,
+        limit=request_body.include_transcript_limit,
+    )
+    model_provider = build_chat_manager_provider(settings=settings, selection=selected_model)
+    manager = ChatManagerAgent(model=model_provider)
+    plan_result = manager.prepare_dispatch(
+        session_title=str(chat_session.get("title") or "Chat execution"),
+        target_repository=target_repository,
+        transcript=transcript,
+        base_branch=base_branch,
+    )
+    plan = await plan_result if inspect.isawaitable(plan_result) else plan_result
+
+    metadata["last_dispatch_plan"] = {
+        "ready": plan.ready,
+        "summary": plan.summary,
+        "issue_title": plan.issue_title,
+        "custom_instructions": plan.custom_instructions,
+        "clarification_questions": plan.clarification_questions,
+        "prepared_at": datetime.now(UTC).isoformat(),
+    }
+
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        repo.update_chat_session_metadata(session_id=session_id, metadata=metadata)
+        if persist_message:
+            repo.append_chat_message(
+                session_id=session_id,
+                role="assistant",
+                content=(
+                    build_dispatch_ready_message(
+                        plan=plan,
+                        target_repository=target_repository,
+                        base_branch=base_branch,
+                        selected_model=selected_model,
+                    )
+                    if plan.ready
+                    else build_dispatch_question_message(plan)
+                ),
+                metadata={
+                    "kind": "dispatch_prepare",
+                    "ready": plan.ready,
+                    "clarification_questions": plan.clarification_questions,
+                    "target_repository": target_repository,
+                    "base_branch": base_branch,
+                    "selected_model": selected_model,
+                    "custom_agent": custom_agent or None,
+                },
+            )
+
+    return {
+        "chat_session": chat_session,
+        "metadata": metadata,
+        "target_repository": target_repository,
+        "base_branch": base_branch,
+        "custom_agent": custom_agent or None,
+        "selected_model": selected_model,
+        "transcript": transcript,
+        "plan": plan,
+        "policy": policy,
+    }
 
 
 async def resolve_repository_installation_id(repository: str) -> int:
@@ -308,6 +667,25 @@ def _extract_pull_request(events: list[dict[str, object]]) -> dict[str, object] 
         "branch": payload.get("branch_name"),
         "base": payload.get("base_branch"),
         "commit_sha": payload.get("commit_sha"),
+    }
+
+
+def _extract_dispatch_issue(events: list[dict[str, object]]) -> dict[str, object] | None:
+    dispatch_event = next(
+        (event for event in reversed(events) if event["event_type"] == "github_agent_dispatched"),
+        None,
+    )
+    if dispatch_event is None:
+        return None
+    payload = dispatch_event["payload"]
+    return {
+        "repository": payload.get("repository"),
+        "issue_number": payload.get("issue_number"),
+        "issue_url": payload.get("issue_url"),
+        "base_branch": payload.get("base_branch"),
+        "model": payload.get("model"),
+        "model_provider": payload.get("model_provider"),
+        "model_cost_tier": payload.get("model_cost_tier"),
     }
 
 
@@ -361,6 +739,7 @@ def _build_dashboard_task_view(
             "pr_draft_title": ((pr_draft_event or {}).get("payload") or {}).get("title"),
             "model_used": ((latest_run or {}).get("metadata") or {}).get("model_used"),
         },
+        "dispatch": _extract_dispatch_issue(run_events),
         "pull_request": _extract_pull_request(run_events),
     }
 
@@ -413,6 +792,13 @@ async def run_github_self_check() -> SelfCheckResponse:
             "app_id_set": bool(settings.github_app_id),
             "private_key_set": bool(settings.github_private_key),
             "webhook_secret_set": bool(settings.github_webhook_secret),
+            "agent_user_token_set": bool(settings.github_agent_user_token),
+        },
+        "chat_dispatch": {
+            "backend": resolve_chat_execution_backend(policy),
+            "agent_user_token_required": resolve_chat_execution_backend(policy)
+            == "github_coding_agent",
+            "agent_user_token_set": bool(settings.github_agent_user_token),
         },
         "app": {"ok": False},
         "repositories": [],
@@ -486,8 +872,12 @@ async def run_github_self_check() -> SelfCheckResponse:
             entry["error"] = str(exc)
         checks["repositories"].append(entry)
 
+    chat_dispatch_ok = True
+    if checks["chat_dispatch"]["agent_user_token_required"]:
+        chat_dispatch_ok = bool(settings.github_agent_user_token)
+
     return SelfCheckResponse(
-        ok=checks["app"]["ok"] and repos_ok,
+        ok=checks["app"]["ok"] and repos_ok and chat_dispatch_ok,
         checked_at=datetime.now(UTC).isoformat(),
         checks=checks,
     )
@@ -707,6 +1097,7 @@ def get_dashboard_data(limit: int = 50) -> dict[str, object]:
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "autonomy_mode": policy.autonomy.mode,
+        "chat_execution_backend": resolve_chat_execution_backend(policy),
         "task_count": len(task_items),
         "polling": polling,
         "model": {
@@ -732,6 +1123,7 @@ def chat_page(_admin: None = Depends(require_admin_token)) -> str:
     _, policy = load_policy()
     chat_config = {
         "adminTokenRequired": bool(settings.api_admin_token),
+        "executionBackend": resolve_chat_execution_backend(policy),
         "availableModels": available_chat_models(settings),
         "defaultModelSelection": serialize_chat_model_selection(
             settings=settings,
@@ -770,6 +1162,10 @@ def create_chat_session(
     metadata = dict(request_body.metadata)
     if request_body.approval_issue_number is not None:
         metadata["approval_issue_number"] = request_body.approval_issue_number
+    if request_body.base_branch:
+        metadata["base_branch"] = request_body.base_branch.strip()
+    if request_body.custom_agent:
+        metadata["custom_agent"] = request_body.custom_agent.strip()
     selected_model = validate_chat_model_selection(
         settings=settings,
         provider=request_body.model_provider,
@@ -919,12 +1315,41 @@ def list_chat_session_runs(
     }
 
 
-@app.post("/chat/sessions/{session_id}/execute")
-async def execute_chat_session(
+@app.post("/chat/sessions/{session_id}/prepare")
+async def prepare_chat_session(
+    session_id: str,
+    request_body: PrepareChatSessionRequest,
+    _admin: None = Depends(require_admin_token),
+) -> dict[str, object]:
+    prepared = await prepare_chat_dispatch_plan(
+        session_id=session_id,
+        request_body=request_body,
+        persist_message=True,
+    )
+    plan = prepared["plan"]
+    return {
+        "ok": True,
+        "backend": resolve_chat_execution_backend(prepared["policy"]),
+        "ready": plan.ready,
+        "summary": plan.summary,
+        "clarification_questions": plan.clarification_questions,
+        "target_repository": prepared["target_repository"],
+        "base_branch": prepared["base_branch"],
+        "custom_agent": prepared["custom_agent"],
+        "selected_model": prepared["selected_model"],
+        "issue_preview": {
+            "title": plan.issue_title,
+            "body_markdown": plan.issue_body_markdown,
+            "custom_instructions": plan.custom_instructions,
+        },
+    }
+
+
+async def _execute_chat_session_local_pipeline(
+    *,
     session_id: str,
     request_body: ExecuteChatSessionRequest,
-    _admin: None = Depends(require_admin_token),
-    x_operator: str | None = Header(default=None),
+    x_operator: str | None,
 ) -> dict[str, object]:
     settings = get_settings()
     _, policy = load_policy()
@@ -1089,6 +1514,181 @@ async def execute_chat_session(
         "source_installation_id": source_installation_id,
         "approval_issue_number": approval_issue_number,
         "selected_model": selected_model,
+    }
+
+
+@app.post("/chat/sessions/{session_id}/execute")
+async def execute_chat_session(
+    session_id: str,
+    request_body: ExecuteChatSessionRequest,
+    _admin: None = Depends(require_admin_token),
+    x_operator: str | None = Header(default=None),
+) -> dict[str, object]:
+    _, policy = load_policy()
+    backend = resolve_chat_execution_backend(policy)
+    if backend == "local_pipeline":
+        return await _execute_chat_session_local_pipeline(
+            session_id=session_id,
+            request_body=request_body,
+            x_operator=x_operator,
+        )
+
+    settings = get_settings()
+    if not settings.github_agent_user_token:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "GITHUB_AGENT_USER_TOKEN is required for github_coding_agent chat execution. "
+                "Use a fine-grained PAT or GitHub App user token as documented by GitHub."
+            ),
+        )
+
+    prepared = await prepare_chat_dispatch_plan(
+        session_id=session_id,
+        request_body=request_body,
+        persist_message=False,
+    )
+    plan: DispatchPlan = prepared["plan"]
+    if not plan.ready:
+        session_factory = create_session_factory()
+        with session_factory() as session:
+            repo = TaskRepository(session)
+            repo.append_chat_message(
+                session_id=session_id,
+                role="assistant",
+                content=build_dispatch_question_message(plan),
+                metadata={
+                    "kind": "dispatch_clarification_required",
+                    "clarification_questions": plan.clarification_questions,
+                    "target_repository": prepared["target_repository"],
+                    "base_branch": prepared["base_branch"],
+                },
+            )
+        return {
+            "ok": False,
+            "dispatched": False,
+            "ready": False,
+            "clarification_required": True,
+            "summary": plan.summary,
+            "clarification_questions": plan.clarification_questions,
+            "target_repository": prepared["target_repository"],
+            "base_branch": prepared["base_branch"],
+            "selected_model": prepared["selected_model"],
+            "backend": "github_coding_agent",
+        }
+
+    operator = normalize_operator_identity(x_operator, fallback="chat-ui")
+    task_title = (
+        request_body.title or str((prepared["chat_session"] or {}).get("title") or "Chat execution")
+    ).strip() or "Chat execution"
+    target_repository = str(prepared["target_repository"])
+    base_branch = str(prepared["base_branch"])
+    selected_model = prepared["selected_model"]
+    custom_agent = prepared["custom_agent"]
+    transcript = str(prepared["transcript"])
+    issue_body = build_github_agent_issue_body(
+        transcript=transcript,
+        prepared_body=plan.issue_body_markdown,
+        target_repository=target_repository,
+        base_branch=base_branch,
+    )
+    dispatch_model = (
+        str(selected_model.get("model"))
+        if isinstance(selected_model, dict) and selected_model.get("provider") == "github"
+        else None
+    )
+
+    github = GitHubAppService(
+        settings.github_app_id,
+        settings.github_private_key,
+        api_base_url=settings.github_api_base_url,
+    )
+    labels = ["agentic", "agentic-dispatch"]
+    try:
+        issue = await github.create_issue_with_coding_agent(
+            target_repository,
+            settings.github_agent_user_token,
+            title=plan.issue_title or task_title,
+            body=issue_body,
+            base_branch=base_branch,
+            labels=labels,
+            custom_instructions=plan.custom_instructions,
+            custom_agent=custom_agent,
+            model=dispatch_model,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to dispatch issue to GitHub coding agent: {exc}",
+        ) from exc
+    issue_number = int(issue.get("number") or 0)
+    issue_url = str(issue.get("html_url") or "")
+
+    session_factory = create_session_factory()
+    with session_factory() as session:
+        repo = TaskRepository(session)
+        payload = build_chat_dispatch_payload(
+            session_id=session_id,
+            task_title=task_title,
+            transcript=transcript,
+            operator=operator,
+            target_repository=target_repository,
+            source_repository=str(policy.system.control_repository or "chat-ui"),
+            base_branch=base_branch,
+            selected_model=selected_model,
+            dispatch_plan=plan,
+            issue_number=issue_number,
+            issue_url=issue_url,
+            issue_labels=labels,
+        )
+        task_id, run_id = create_dispatch_audit_record(
+            repo=repo,
+            task_title=task_title,
+            payload=payload,
+            dispatch_plan=plan,
+            issue_number=issue_number,
+            issue_url=issue_url,
+            target_repository=target_repository,
+            base_branch=base_branch,
+            selected_model=selected_model,
+        )
+        repo.append_chat_message(
+            session_id=session_id,
+            role="system",
+            content=(
+                f"Dispatched to GitHub coding agent in {target_repository}: issue #{issue_number}"
+                f" ({issue_url})"
+            ),
+            metadata={
+                "kind": "github_agent_dispatch",
+                "task_id": task_id,
+                "run_id": run_id,
+                "issue_number": issue_number,
+                "issue_url": issue_url,
+                "target_repository": target_repository,
+                "base_branch": base_branch,
+                "selected_model": selected_model,
+                "custom_agent": custom_agent,
+            },
+        )
+
+    return {
+        "ok": True,
+        "dispatched": True,
+        "backend": "github_coding_agent",
+        "task_id": task_id,
+        "run_id": run_id,
+        "state": TaskState.DELEGATED.value,
+        "target_repository": target_repository,
+        "base_branch": base_branch,
+        "selected_model": selected_model,
+        "custom_agent": custom_agent,
+        "summary": plan.summary,
+        "issue": {
+            "number": issue_number,
+            "url": issue_url,
+            "repository": target_repository,
+        },
     }
 
 

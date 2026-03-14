@@ -69,3 +69,6 @@ budgets:
   max_prompt_tokens: 32000
   max_completion_tokens: 8000
   max_parallel_candidates: 1
+chat:
+  execution_backend: github_coding_agent
+  auto_prepare: true
