@@ -53,10 +53,16 @@ The app also supports remote intake from `http://localhost:8080/chat`.
 
 1. Open `/chat`.
 2. If `API_ADMIN_TOKEN` is configured, enter it when prompted by the UI.
-3. Create a session for an allowed target repository.
+3. Create a session for an allowed target repository and choose the execution model from the dropdown.
 4. Add one or more messages describing the work.
 5. In `gated` mode, set an approval issue number on the session or execution request.
 6. Execute the session to enqueue it as a normal task.
+
+The model dropdown is populated from the live backend runtime:
+
+- `0x` means no premium Copilot token charge
+- `1x` means premium Copilot token charge
+- `local` means the configured Ollama model
 
 Chat sessions are persisted in PostgreSQL and linked back to any tasks they create.
 

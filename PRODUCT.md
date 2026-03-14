@@ -302,6 +302,8 @@ The platform now includes a first-class chat intake UI at `GET /chat` for remote
 - Each session is bound to an allowed target repository
 - Operator identity is carried on each write via `X-Operator`
 - The page prompts for `X-Admin-Token` when `API_ADMIN_TOKEN` is configured
+- The page includes a runtime-backed model selector so operators can choose the execution model per session/run
+- GitHub-hosted model options are labeled with Copilot cost tiers: `0x` and `1x`
 - Session execution enqueues a normal task into the same pipeline and queue
 - Session transcripts are converted into task payloads with full run traceability
 

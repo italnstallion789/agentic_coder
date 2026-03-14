@@ -64,7 +64,6 @@ def process_task(
     autonomy_mode: str,
     workspace_root: Path,
 ) -> str:
-    pipeline = TaskPipeline(workspace_root=workspace_root)
     run_id = repo.create_run(task_id, worker_name="worker")
     try:
         repo.append_run_event(
@@ -101,6 +100,12 @@ def process_task(
         current_task = repo.get_by_id(task_id)
         if current_task is None:
             raise ValueError(f"Task not found during processing: {task_id}")
+        pipeline = TaskPipeline(
+            workspace_root=workspace_root,
+            model_provider_override=str(current_task.payload.get("model_provider") or "").strip()
+            or None,
+            model_name_override=str(current_task.payload.get("model_name") or "").strip() or None,
+        )
         result = pipeline.run(current_task)
 
         source_repo_name = str(current_task.payload.get("source_repository") or "").split(

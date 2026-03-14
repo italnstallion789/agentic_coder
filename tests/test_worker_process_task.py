@@ -113,8 +113,14 @@ def test_resolve_workspace_root_by_repo_name() -> None:
 
 def test_process_task_fails_on_control_repo_path_leak(monkeypatch) -> None:
     class _LeakyPipeline:
-        def __init__(self, workspace_root: Path) -> None:
-            _ = workspace_root
+        def __init__(
+            self,
+            workspace_root: Path,
+            *,
+            model_provider_override: str | None = None,
+            model_name_override: str | None = None,
+        ) -> None:
+            _ = workspace_root, model_provider_override, model_name_override
 
         def run(self, task: TaskRecord) -> _PipelineResult:
             _ = task

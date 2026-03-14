@@ -35,13 +35,21 @@ class PipelineResult:
 
 
 class TaskPipeline:
-    def __init__(self, workspace_root: Path) -> None:
+    def __init__(
+        self,
+        workspace_root: Path,
+        *,
+        model_provider_override: str | None = None,
+        model_name_override: str | None = None,
+    ) -> None:
         self.workspace_root = workspace_root
         self.retriever = InMemoryRetriever()
         self.context_agent = ContextRetrievalAgent(self.retriever)
         self.graph_builder = KnowledgeGraphBuilder()
         self.settings = get_settings()
         self.policy = PolicyLoader(path=Path("agentic.yaml")).load()
+        self.model_provider_override = str(model_provider_override or "").strip() or None
+        self.model_name_override = str(model_name_override or "").strip() or None
         self.router = self._build_model_router()
         provider_name, model_name = self._select_provider()
         self._model_used: str | None = f"{provider_name}:{model_name}" if provider_name else None
@@ -55,21 +63,38 @@ class TaskPipeline:
 
     def _build_model_router(self) -> ModelRouter:
         providers: dict[str, ModelProvider] = {}
+        github_model = (
+            self.model_name_override
+            if self.model_provider_override == "github" and self.model_name_override
+            else self.settings.github_models_chat_model
+        )
+        ollama_model = (
+            self.model_name_override
+            if self.model_provider_override == "ollama" and self.model_name_override
+            else self.settings.ollama_chat_model
+        )
         if self.settings.github_models_api_key:
             providers["github"] = GitHubHostedProvider(
                 api_key=self.settings.github_models_api_key,
-                model=self.settings.github_models_chat_model,
+                model=github_model,
                 base_url=self.settings.github_models_base_url,
                 timeout_seconds=self.settings.model_request_timeout_seconds,
             )
         providers["ollama"] = OllamaProvider(
-            model=self.settings.ollama_chat_model,
+            model=ollama_model,
             base_url=self.settings.ollama_base_url,
             timeout_seconds=self.settings.model_request_timeout_seconds,
         )
         return ModelRouter(providers=providers)
 
     def _select_provider(self) -> tuple[str | None, str | None]:
+        if (
+            self.model_provider_override
+            and self.model_name_override
+            and self.router.has(self.model_provider_override)
+        ):
+            return self.model_provider_override, self.model_name_override
+
         primary = self.policy.models.primary_provider
         fallback = self.policy.models.fallback_provider
 
