@@ -387,7 +387,7 @@ def build_approval_comment(
     )
 
 
-def create_pr_for_ready_task(
+async def create_pr_for_ready_task_async(
     *,
     repo: TaskRepository,
     task_id: str,
@@ -482,7 +482,7 @@ def create_pr_for_ready_task(
     )
 
     try:
-        result = asyncio.run(_open_pr())
+        result = await _open_pr()
     except Exception as exc:
         repo.append_run_event(
             run_id,
@@ -526,6 +526,30 @@ def create_pr_for_ready_task(
     )
     repo.complete_run(run_id, status="succeeded")
     return True
+
+
+def create_pr_for_ready_task(
+    *,
+    repo: TaskRepository,
+    task_id: str,
+    requested_by: str,
+    policy: object,
+) -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(
+            create_pr_for_ready_task_async(
+                repo=repo,
+                task_id=task_id,
+                requested_by=requested_by,
+                policy=policy,
+            )
+        )
+    raise RuntimeError(
+        "create_pr_for_ready_task cannot run inside an active event loop; "
+        "use create_pr_for_ready_task_async instead"
+    )
 
 
 def publish_approval_request_comment(
@@ -605,7 +629,7 @@ def _status_label(status: str) -> str:
     return f"agentic:{normalized}"
 
 
-def publish_issue_status_update(
+async def publish_issue_status_update_for_task_async(
     *,
     task_payload: dict[str, object],
     status: str,
@@ -639,30 +663,35 @@ def publish_issue_status_update(
         settings.github_private_key,
         api_base_url=settings.github_api_base_url,
     )
+    await publish_issue_status_update_async(
+        github=github,
+        source_repository=source_repository,
+        issue_number=issue_number,
+        installation_id=installation_id,
+        status=status,
+        body=body,
+    )
+
+
+def publish_issue_status_update(
+    *,
+    task_payload: dict[str, object],
+    status: str,
+    summary: str,
+    details: dict[str, object] | None = None,
+) -> None:
+    publish_coro = publish_issue_status_update_for_task_async(
+        task_payload=task_payload,
+        status=status,
+        summary=summary,
+        details=details,
+    )
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        asyncio.run(
-            publish_issue_status_update_async(
-                github=github,
-                source_repository=source_repository,
-                issue_number=issue_number,
-                installation_id=installation_id,
-                status=status,
-                body=body,
-            )
-        )
+        asyncio.run(publish_coro)
     else:
-        loop.create_task(
-            publish_issue_status_update_async(
-                github=github,
-                source_repository=source_repository,
-                issue_number=issue_number,
-                installation_id=installation_id,
-                status=status,
-                body=body,
-            )
-        )
+        loop.create_task(publish_coro)
 
 
 async def publish_issue_status_update_async(
@@ -842,14 +871,14 @@ def poll_control_repository_once(
                         )
                         approved += 1
                         try:
-                            if create_pr_for_ready_task(
+                            if await create_pr_for_ready_task_async(
                                 repo=repo,
                                 task_id=approved_task_id,
                                 requested_by=normalized.sender,
                                 policy=policy,
                             ):
                                 prs_created += 1
-                                publish_issue_status_update(
+                                await publish_issue_status_update_for_task_async(
                                     task_payload=task.payload,
                                     status="pr_opened",
                                     summary="Approval received and draft PR opened",
@@ -859,7 +888,7 @@ def poll_control_repository_once(
                                     },
                                 )
                             else:
-                                publish_issue_status_update(
+                                await publish_issue_status_update_for_task_async(
                                     task_payload=task.payload,
                                     status="failed",
                                     summary="Approval received but PR creation failed",
@@ -895,7 +924,7 @@ def poll_control_repository_once(
                         )
                         approved += 1
                         try:
-                            if create_pr_for_ready_task(
+                            if await create_pr_for_ready_task_async(
                                 repo=repo,
                                 task_id=latest_task_id,
                                 requested_by=normalized.sender,
@@ -903,7 +932,7 @@ def poll_control_repository_once(
                             ):
                                 prs_created += 1
                                 if latest_task is not None:
-                                    publish_issue_status_update(
+                                    await publish_issue_status_update_for_task_async(
                                         task_payload=latest_task.payload,
                                         status="pr_opened",
                                         summary="Approval received and draft PR opened",
@@ -911,10 +940,10 @@ def poll_control_repository_once(
                                             "task_id": latest_task_id,
                                             "approved_by": normalized.sender,
                                         },
-                                    )
+                                )
                             else:
                                 if latest_task is not None:
-                                    publish_issue_status_update(
+                                    await publish_issue_status_update_for_task_async(
                                         task_payload=latest_task.payload,
                                         status="failed",
                                         summary="Approval received but PR creation failed",
@@ -952,7 +981,7 @@ def poll_control_repository_once(
                 },
             )
             queue.enqueue(task.task_id)
-            publish_issue_status_update(
+            await publish_issue_status_update_for_task_async(
                 task_payload=task.payload,
                 status="queued",
                 summary="Task request received and queued",
