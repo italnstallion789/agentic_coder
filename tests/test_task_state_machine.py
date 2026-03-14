@@ -19,3 +19,15 @@ def test_invalid_task_transition() -> None:
 
     with pytest.raises(InvalidTaskTransitionError):
         machine.transition(task, TaskState.RUNNING)
+
+
+def test_chat_dispatch_transition_path() -> None:
+    task = TaskRecord(task_id="1", title="Dispatch task", payload={})
+    machine = TaskStateMachine()
+
+    machine.transition(task, TaskState.NORMALIZED)
+    machine.transition(task, TaskState.PLANNED)
+    machine.transition(task, TaskState.RUNNING)
+    machine.transition(task, TaskState.DELEGATED)
+
+    assert task.state == TaskState.DELEGATED
