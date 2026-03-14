@@ -182,6 +182,22 @@ class _TimelineRepo:
             return []
         return [
             {
+                "event_id": "evt-0",
+                "run_id": "run-1",
+                "event_type": "proposal_generated",
+                "payload": {
+                    "summary": "Implement cache",
+                    "target_files": ["src/cache.py"],
+                    "file_changes": [
+                        {
+                            "path": "src/cache.py",
+                            "content": "def cache():\n    return True\n",
+                        }
+                    ],
+                },
+                "created_at": datetime.now(UTC),
+            },
+            {
                 "event_id": "evt-1",
                 "run_id": "run-1",
                 "event_type": "plan_created",
@@ -253,10 +269,12 @@ def test_run_replay_endpoint(monkeypatch) -> None:
     assert data["run"]["metadata"]["objective"] == "Implement cache"
     assert len(data["timeline"]) == 1
     assert len(data["events"]) >= 2
-    assert data["events"][0]["event_type"] == "plan_created"
+    assert "plan_created" in [event["event_type"] for event in data["events"]]
 
 
 class _FakeGithubService:
+    written_paths: list[str] = []
+
     def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
         self.created: list[tuple[str, str]] = []
 
@@ -297,6 +315,7 @@ class _FakeGithubService:
         content: str,
     ) -> dict[str, object]:
         _ = repository, installation_token, branch, message, content
+        self.__class__.written_paths.append(path)
         return {"commit": {"sha": "commit123"}, "content": {"path": path}}
 
     async def create_pull_request(
@@ -323,6 +342,7 @@ class _FakeGithubService:
 def test_create_pull_request_from_run(monkeypatch) -> None:
     from agentic_coder.api import main
 
+    _FakeGithubService.written_paths = []
     monkeypatch.setattr(main, "TaskRepository", _TimelineRepo)
     monkeypatch.setattr(main, "create_session_factory", lambda: _FakeSessionFactory())
     monkeypatch.setattr(main, "GitHubAppService", _FakeGithubService)
@@ -336,9 +356,11 @@ def test_create_pull_request_from_run(monkeypatch) -> None:
     data = response.json()
     assert data["run_id"] == "run-1"
     assert data["repository"] == "acme/predictiv"
+    assert data["changed_files"] == ["src/cache.py"]
     assert data["artifact"]["path"] == ".agentic/runs/run-1.md"
     assert data["artifact"]["commit_sha"] == "commit123"
     assert data["pull_request"]["number"] == 7
+    assert _FakeGithubService.written_paths == ["src/cache.py", ".agentic/runs/run-1.md"]
 
 
 def test_get_startup_self_check_endpoint() -> None:

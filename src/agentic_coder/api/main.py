@@ -17,6 +17,7 @@ from agentic_coder.domain.tasks import TaskState
 from agentic_coder.github_app.service import GitHubAppService, WebhookVerifier
 from agentic_coder.logging import configure_logging
 from agentic_coder.policy.loader import PolicyLoader, resolve_policy_path
+from agentic_coder.pull_requests import apply_pull_request_changes, extract_proposed_file_changes
 from agentic_coder.queue.redis_queue import RedisTaskQueue
 
 configure_logging()
@@ -1218,6 +1219,7 @@ async def create_pull_request_from_run(
     if pr_event is None:
         raise HTTPException(status_code=400, detail="PR draft metadata not found for run")
     pr_body = str(pr_event["payload"].get("body") or "Automated change set")
+    file_changes = extract_proposed_file_changes(events)
 
     settings = get_settings()
     github = GitHubAppService(
@@ -1231,23 +1233,17 @@ async def create_pull_request_from_run(
     base_sha = await github.get_branch_head_sha(repository, base_branch, token)
     await github.create_branch(repository, request_body.branch_name, base_sha, token)
 
-    artifact_path = f".agentic/runs/{run_id}.md"
-    artifact_content = (
-        f"# Run {run_id}\n\n"
-        f"- Repository: {repository}\n"
-        f"- Task ID: {task.task_id}\n"
-        f"- Run status: {run['status']}\n\n"
-        f"## PR Draft\n\n"
-        f"### Title\n{pr_title}\n\n"
-        f"### Body\n{pr_body}\n"
-    )
-    commit_result = await github.upsert_file(
-        repository,
-        token,
+    applied = await apply_pull_request_changes(
+        github=github,
+        repository=repository,
+        installation_token=token,
         branch=request_body.branch_name,
-        path=artifact_path,
-        message=f"agentic: add run artifact {run_id}",
-        content=artifact_content,
+        run_id=run_id,
+        task_id=task.task_id,
+        requested_by="manual_api",
+        pr_title=pr_title,
+        pr_body=pr_body,
+        file_changes=file_changes,
     )
 
     pull_request = await github.create_pull_request(
@@ -1263,9 +1259,10 @@ async def create_pull_request_from_run(
     return {
         "repository": repository,
         "run_id": run_id,
+        "changed_files": applied.changed_files,
         "artifact": {
-            "path": artifact_path,
-            "commit_sha": ((commit_result.get("commit") or {}).get("sha")),
+            "path": applied.artifact_path,
+            "commit_sha": applied.artifact_commit_sha,
         },
         "pull_request": {
             "id": pull_request.get("id"),

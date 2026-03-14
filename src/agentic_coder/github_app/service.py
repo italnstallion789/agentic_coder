@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import re
 import time
-from base64 import b64encode
+from base64 import b64decode, b64encode
 from datetime import UTC, datetime
 from typing import Any
 
@@ -314,6 +314,18 @@ class GitHubAppService:
         ref: str,
         installation_token: str,
     ) -> str | None:
+        file_info = await self.get_file(repository, path, ref, installation_token)
+        if file_info is None:
+            return None
+        return str(file_info.get("sha") or "") or None
+
+    async def get_file(
+        self,
+        repository: str,
+        path: str,
+        ref: str,
+        installation_token: str,
+    ) -> dict[str, Any] | None:
         url = f"{self.api_base_url}/repos/{repository}/contents/{path}"
         headers = self._installation_headers(installation_token)
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -321,7 +333,11 @@ class GitHubAppService:
         if response.status_code == 404:
             return None
         response.raise_for_status()
-        return response.json().get("sha")
+        payload: dict[str, Any] = response.json()
+        encoded_content = str(payload.get("content") or "")
+        if payload.get("encoding") == "base64" and encoded_content:
+            payload["decoded_content"] = b64decode(encoded_content).decode("utf-8")
+        return payload
 
     async def upsert_file(
         self,
@@ -333,7 +349,15 @@ class GitHubAppService:
         message: str,
         content: str,
     ) -> dict[str, Any]:
-        existing_sha = await self.get_file_sha(repository, path, branch, installation_token)
+        existing_file = await self.get_file(repository, path, branch, installation_token)
+        existing_sha = (existing_file or {}).get("sha")
+        existing_content = (existing_file or {}).get("decoded_content")
+        if existing_content == content:
+            return {
+                "commit": {},
+                "content": {"path": path},
+                "skipped": True,
+            }
         encoded_content = b64encode(content.encode("utf-8")).decode("utf-8")
         url = f"{self.api_base_url}/repos/{repository}/contents/{path}"
         headers = self._installation_headers(installation_token)
