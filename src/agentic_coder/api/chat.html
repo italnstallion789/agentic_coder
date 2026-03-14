@@ -286,6 +286,8 @@
   </div>
 
   <script>
+    window.AGENTIC_CHAT_CONFIG = __AGENTIC_CHAT_CONFIG__;
+
     const state = {
       sessions: [],
       activeSessionId: null,
@@ -306,6 +308,9 @@
       if (stored) {
         state.token = stored;
         return stored;
+      }
+      if (!window.AGENTIC_CHAT_CONFIG?.adminTokenRequired) {
+        return null;
       }
       const entered = window.prompt("Enter API admin token (X-Admin-Token):", "");
       if (entered) {
