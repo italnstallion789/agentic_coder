@@ -839,7 +839,7 @@ def poll_control_repository_once(
                         },
                     )
                     if target_task is not None:
-                        publish_issue_status_update(
+                        await publish_issue_status_update_for_task_async(
                             task_payload=target_task.payload,
                             status="rejected",
                             summary="Task was rejected from GitHub comment",

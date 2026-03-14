@@ -351,3 +351,92 @@ def test_poll_control_repository_once_uses_async_helpers_for_approval_flow(monke
     assert repo.cursor is not None
     assert repo.cursor["last_approved_count"] == 1
     assert repo.cursor["last_prs_created_count"] == 1
+
+
+def test_poll_control_repository_once_uses_async_status_helper_for_rejections(
+    monkeypatch,
+) -> None:
+    repo = _PollingApprovalRepo()
+    status_calls: list[dict[str, object]] = []
+
+    class _RejectingGithub(_PollingGithub):
+        async def list_issue_comments_since(
+            self,
+            repository: str,
+            installation_token: str,
+            *,
+            since: str | None,
+            per_page: int = 50,
+        ) -> list[dict[str, object]]:
+            _ = repository, installation_token, since, per_page
+            return [
+                {
+                    "id": 502,
+                    "updated_at": "2026-03-14T12:01:00Z",
+                    "body": "/reject 123e4567-e89b-12d3-a456-426614174000 too risky",
+                    "issue_url": "https://api.github.com/repos/acme/control/issues/42",
+                    "user": {"login": "alex", "type": "User"},
+                }
+            ]
+
+        def normalize_polled_issue_comment(
+            self,
+            source_repository: str,
+            installation_id: int,
+            comment: dict[str, object],
+        ) -> NormalizedGithubTask:
+            _ = installation_id, comment
+            return NormalizedGithubTask(
+                event_name="issue_comment",
+                source_repository=source_repository,
+                target_repository="acme/predictiv",
+                installation_id=77,
+                title="Issue #42 comment from alex",
+                body="/reject 123e4567-e89b-12d3-a456-426614174000 too risky",
+                issue_number=42,
+                sender="alex",
+                raw_event={"polling": True},
+            )
+
+    async def _fake_publish_issue_status_update_for_task_async(**kwargs) -> None:  # noqa: ANN003
+        status_calls.append(kwargs)
+
+    def _sync_status_should_not_run(**kwargs) -> None:  # noqa: ANN003
+        raise AssertionError("sync status helper should not be used inside polling loop")
+
+    monkeypatch.setattr(worker_module, "GitHubAppService", _RejectingGithub)
+    monkeypatch.setattr(
+        worker_module,
+        "get_settings",
+        lambda: type(
+            "_Settings",
+            (),
+            {
+                "github_app_id": "1",
+                "github_private_key": "test-key",
+                "github_api_base_url": "https://api.github.com",
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "publish_issue_status_update_for_task_async",
+        _fake_publish_issue_status_update_for_task_async,
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "publish_issue_status_update",
+        _sync_status_should_not_run,
+    )
+
+    created = worker_module.poll_control_repository_once(
+        _PollingPolicy(),
+        repo,  # type: ignore[arg-type]
+        _PollingQueue(),  # type: ignore[arg-type]
+    )
+
+    assert created == 0
+    assert repo.transitions == [("cancelled", "github_comment_rejected")]
+    assert status_calls[0]["status"] == "rejected"
+    assert repo.cursor is not None
+    assert repo.cursor["last_rejected_count"] == 1
