@@ -4,6 +4,21 @@ from pathlib import Path
 from agentic_coder.knowledge_graph.models import GraphEdge, GraphNode, GraphNodeType
 from agentic_coder.knowledge_graph.service import InMemoryKnowledgeGraph
 
+IGNORED_PATH_PARTS = {
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+}
+
+
+def _is_ignored_path(path: Path) -> bool:
+    return any(part in IGNORED_PATH_PARTS for part in path.parts)
+
 
 class KnowledgeGraphBuilder:
     def build_from_workspace(self, workspace_root: Path) -> InMemoryKnowledgeGraph:
@@ -12,7 +27,7 @@ class KnowledgeGraphBuilder:
         graph.add_node(repo_node)
 
         for file_path in workspace_root.rglob("*.py"):
-            if "/." in str(file_path):
+            if _is_ignored_path(file_path):
                 continue
             rel = str(file_path.relative_to(workspace_root))
             file_node_id = f"file:{rel}"

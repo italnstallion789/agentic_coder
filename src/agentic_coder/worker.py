@@ -387,20 +387,25 @@ def build_approval_comment(
     )
 
 
-def create_pr_for_approved_task(
+def create_pr_for_ready_task(
     *,
     repo: TaskRepository,
     task_id: str,
-    approved_by: str,
+    requested_by: str,
     policy: object,
 ) -> bool:
     task = repo.get_by_id(task_id)
     if task is None:
         return False
 
+    if task.state != TaskState.READY:
+        return False
+
     payload = task.payload
     repository = str(payload.get("repository") or "")
-    installation_id = int(payload.get("installation_id") or 0)
+    installation_id = int(
+        payload.get("target_installation_id") or payload.get("installation_id") or 0
+    )
     if not repository or installation_id <= 0:
         return False
 
@@ -439,8 +444,8 @@ def create_pr_for_approved_task(
             f"# Run {run_id}\n\n"
             f"- Repository: {repository}\n"
             f"- Task ID: {task.task_id}\n"
-            "- Approved via GitHub comment\n"
-            f"- Approved by: {approved_by}\n\n"
+            "- PR triggered by Agentic workflow\n"
+            f"- Requested by: {requested_by}\n\n"
             f"## PR Title\n{pr_title}\n\n"
             f"## PR Body\n{pr_body}\n"
         )
@@ -468,13 +473,38 @@ def create_pr_for_approved_task(
             "commit_sha": ((commit_result.get("commit") or {}).get("sha") or ""),
         }
 
-    result = asyncio.run(_open_pr())
+    repo.update_state(
+        task_id,
+        TaskState.RUNNING,
+        run_id=run_id,
+        reason="pr_creation_started",
+        details={"requested_by": requested_by},
+    )
+
+    try:
+        result = asyncio.run(_open_pr())
+    except Exception as exc:
+        repo.append_run_event(
+            run_id,
+            "pr_creation_failed",
+            {"requested_by": requested_by, "error": str(exc)},
+        )
+        repo.update_state(
+            task_id,
+            TaskState.FAILED,
+            run_id=run_id,
+            reason="pr_creation_failed",
+            details={"requested_by": requested_by, "error": str(exc)},
+        )
+        repo.complete_run(run_id, status="failed")
+        return False
+
     pull_request = dict(result.get("pull_request") or {})
     repo.append_run_event(
         run_id,
         "approval_pr_created",
         {
-            "approved_by": approved_by,
+            "requested_by": requested_by,
             "repository": repository,
             "branch_name": result.get("branch_name"),
             "base_branch": result.get("base_branch"),
@@ -487,13 +517,14 @@ def create_pr_for_approved_task(
         task_id,
         TaskState.SUCCEEDED,
         run_id=run_id,
-        reason="github_comment_approved_and_pr_opened",
+        reason="pr_opened",
         details={
-            "approved_by": approved_by,
+            "requested_by": requested_by,
             "pull_request_number": pull_request.get("number"),
             "pull_request_url": pull_request.get("html_url"),
         },
     )
+    repo.complete_run(run_id, status="succeeded")
     return True
 
 
@@ -506,10 +537,22 @@ def publish_approval_request_comment(
 ) -> None:
     source_repository = str(task_payload.get("source_repository") or "")
     issue_number = int(task_payload.get("issue_number") or 0)
-    installation_id = int(task_payload.get("installation_id") or 0)
+    installation_id = int(
+        task_payload.get("source_installation_id") or task_payload.get("installation_id") or 0
+    )
     target_repository = str(task_payload.get("repository") or "")
 
     if not source_repository or issue_number <= 0 or installation_id <= 0:
+        repo.append_run_event(
+            run_id,
+            "approval_comment_skipped",
+            {
+                "reason": "missing_issue_context",
+                "source_repository": source_repository,
+                "issue_number": issue_number,
+                "installation_id": installation_id,
+            },
+        )
         return
 
     events = repo.list_run_events(run_id=run_id, limit=200)
@@ -571,7 +614,9 @@ def publish_issue_status_update(
 ) -> None:
     source_repository = str(task_payload.get("source_repository") or "")
     issue_number = int(task_payload.get("issue_number") or 0)
-    installation_id = int(task_payload.get("installation_id") or 0)
+    installation_id = int(
+        task_payload.get("source_installation_id") or task_payload.get("installation_id") or 0
+    )
     if not source_repository or issue_number <= 0 or installation_id <= 0:
         return
 
@@ -797,10 +842,10 @@ def poll_control_repository_once(
                         )
                         approved += 1
                         try:
-                            if create_pr_for_approved_task(
+                            if create_pr_for_ready_task(
                                 repo=repo,
                                 task_id=approved_task_id,
-                                approved_by=normalized.sender,
+                                requested_by=normalized.sender,
                                 policy=policy,
                             ):
                                 prs_created += 1
@@ -808,6 +853,16 @@ def poll_control_repository_once(
                                     task_payload=task.payload,
                                     status="pr_opened",
                                     summary="Approval received and draft PR opened",
+                                    details={
+                                        "task_id": approved_task_id,
+                                        "approved_by": normalized.sender,
+                                    },
+                                )
+                            else:
+                                publish_issue_status_update(
+                                    task_payload=task.payload,
+                                    status="failed",
+                                    summary="Approval received but PR creation failed",
                                     details={
                                         "task_id": approved_task_id,
                                         "approved_by": normalized.sender,
@@ -840,10 +895,10 @@ def poll_control_repository_once(
                         )
                         approved += 1
                         try:
-                            if create_pr_for_approved_task(
+                            if create_pr_for_ready_task(
                                 repo=repo,
                                 task_id=latest_task_id,
-                                approved_by=normalized.sender,
+                                requested_by=normalized.sender,
                                 policy=policy,
                             ):
                                 prs_created += 1
@@ -852,6 +907,17 @@ def poll_control_repository_once(
                                         task_payload=latest_task.payload,
                                         status="pr_opened",
                                         summary="Approval received and draft PR opened",
+                                        details={
+                                            "task_id": latest_task_id,
+                                            "approved_by": normalized.sender,
+                                        },
+                                    )
+                            else:
+                                if latest_task is not None:
+                                    publish_issue_status_update(
+                                        task_payload=latest_task.payload,
+                                        status="failed",
+                                        summary="Approval received but PR creation failed",
                                         details={
                                             "task_id": latest_task_id,
                                             "approved_by": normalized.sender,
@@ -875,6 +941,8 @@ def poll_control_repository_once(
                     "source_repository": normalized.source_repository,
                     "repository": normalized.target_repository,
                     "installation_id": normalized.installation_id,
+                    "source_installation_id": normalized.installation_id,
+                    "target_installation_id": normalized.installation_id,
                     "title": normalized.title,
                     "body": normalized.body,
                     "issue_number": normalized.issue_number,
@@ -986,6 +1054,34 @@ def main() -> None:
                         "run_id": run_id,
                     },
                 )
+            elif (
+                updated_task
+                and updated_task.state == TaskState.READY
+                and policy.autonomy.mode == "autonomous"
+            ):
+                created = create_pr_for_ready_task(
+                    repo=repo,
+                    task_id=updated_task.task_id,
+                    requested_by="autonomous_mode",
+                    policy=policy,
+                )
+                if created:
+                    publish_issue_status_update(
+                        task_payload=updated_task.payload,
+                        status="pr_opened",
+                        summary="Autonomous mode opened a draft PR",
+                        details={
+                            "task_id": updated_task.task_id,
+                            "run_id": run_id,
+                        },
+                    )
+                else:
+                    publish_issue_status_update(
+                        task_payload=updated_task.payload,
+                        status="failed",
+                        summary="Autonomous mode failed to open draft PR",
+                        details={"task_id": updated_task.task_id, "run_id": run_id},
+                    )
 
         logger.info(
             "worker.task_processed",

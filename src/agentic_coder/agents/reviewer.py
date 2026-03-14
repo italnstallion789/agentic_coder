@@ -32,7 +32,8 @@ class ReviewerAgent:
     def _review_with_model(self, proposal: PatchProposal) -> ReviewResult:
         file_list = ", ".join(proposal.target_files) or "(none)"
         prompt = (
-            "You are a senior code reviewer. Evaluate the scope and integrity of a proposed change.\n"
+            "You are a senior code reviewer. Evaluate the scope and integrity of a proposed"
+            " change.\n"
             "Return ONLY compact JSON with keys:\n"
             "  - approved (bool): whether the proposal is acceptable\n"
             "  - feedback (string): concise reviewer notes\n\n"
@@ -40,7 +41,10 @@ class ReviewerAgent:
             f"Target files: {file_list}\n"
         )
         messages = [
-            ChatMessage(role="system", content="You are a senior code reviewer. Respond only with valid JSON."),
+            ChatMessage(
+                role="system",
+                content="You are a senior code reviewer. Respond only with valid JSON.",
+            ),
             ChatMessage(role="user", content=prompt),
         ]
         response = asyncio.run(self.model.chat(messages))

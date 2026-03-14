@@ -32,15 +32,21 @@ class SecurityAgent:
     def _scan_with_model(self, body: str) -> SecurityResult:
         stub = self._scan_stub(body)
         prompt = (
-            "You are an application security engineer performing a threat review of a code change request.\n"
-            "Identify security risks such as injection, privilege escalation, data exposure, or unsafe operations.\n"
+            "You are an application security engineer performing a threat review of a code"
+            " change request.\n"
+            "Identify security risks such as injection, privilege escalation, data exposure,"
+            " or unsafe operations.\n"
             "Return ONLY compact JSON with keys:\n"
             "  - passed (bool): true if no serious risks found\n"
-            "  - findings (array of strings): brief description of each risk found (empty array if none)\n\n"
+            "  - findings (array of strings): brief description of each risk found (empty array"
+            " if none)\n\n"
             f"Change request:\n{body}\n"
         )
         messages = [
-            ChatMessage(role="system", content="You are a security engineer. Respond only with valid JSON."),
+            ChatMessage(
+                role="system",
+                content="You are a security engineer. Respond only with valid JSON.",
+            ),
             ChatMessage(role="user", content=prompt),
         ]
         response = asyncio.run(self.model.chat(messages))

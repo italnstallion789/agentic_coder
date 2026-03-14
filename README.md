@@ -45,6 +45,9 @@ Quick commands (default path):
 - `make bootstrap` start stack + migrate + run startup self-check
 - `make test` run pytest in container
 - `make lint` run ruff in container
+- `make test-regression` run lint + full pytest suite
+- `make smoke` run runtime smoke tests against live API container
+- `make qa` run regression + smoke end-to-end
 - `make shell` open shell in api container
 
 Notes:
@@ -177,6 +180,7 @@ If `make` is unavailable, use direct Compose commands:
 - `docker compose up --build -d`
 - `docker compose run --rm api pytest`
 - `docker compose run --rm api ruff check src tests`
+- `docker compose run --rm -e BASE_URL=http://api:8080 api python scripts/smoke_test.py --base-url http://api:8080 --target-repository predictiv`
 
 The repository includes a `.devcontainer` configuration so VS Code can attach directly to the `api` service and use the container interpreter for analysis and testing.
 
