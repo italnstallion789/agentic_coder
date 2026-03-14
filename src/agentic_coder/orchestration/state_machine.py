@@ -2,7 +2,12 @@ from agentic_coder.domain.tasks import TaskRecord, TaskState
 
 TRANSITIONS: dict[TaskState, set[TaskState]] = {
     TaskState.RECEIVED: {TaskState.NORMALIZED, TaskState.FAILED, TaskState.CANCELLED},
-    TaskState.NORMALIZED: {TaskState.INDEXED, TaskState.FAILED, TaskState.CANCELLED},
+    TaskState.NORMALIZED: {
+        TaskState.INDEXED,
+        TaskState.PLANNED,
+        TaskState.FAILED,
+        TaskState.CANCELLED,
+    },
     TaskState.INDEXED: {TaskState.PLANNED, TaskState.FAILED, TaskState.CANCELLED},
     TaskState.PLANNED: {TaskState.RUNNING, TaskState.FAILED, TaskState.CANCELLED},
     TaskState.AWAITING_APPROVAL: {TaskState.READY, TaskState.FAILED, TaskState.CANCELLED},
