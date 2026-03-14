@@ -81,6 +81,10 @@ Remote approvals remain GitHub-native in `gated` mode:
 - Comment `/approve` or `/approve <task_id>` on the control-repo issue thread
 - Comment `/reject <task_id> reason` or `/reject reason`
 - Chat executions in `gated` mode require an approval issue number so the worker knows where to post approval and status comments
+- The chat UI exposes a model dropdown sourced from the backend runtime, with cost labels:
+  - `0x`: no premium Copilot token charge
+  - `1x`: premium Copilot token charge
+  - `local`: local Ollama runtime
 
 ### GitHub PR workflow
 

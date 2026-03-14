@@ -17,6 +17,11 @@ from agentic_coder.db.session import create_session_factory
 from agentic_coder.domain.tasks import TaskState
 from agentic_coder.github_app.service import GitHubAppService, WebhookVerifier
 from agentic_coder.logging import configure_logging
+from agentic_coder.models.catalog import (
+    available_chat_models,
+    default_chat_model_selection,
+    find_chat_model_option,
+)
 from agentic_coder.policy.loader import PolicyLoader, resolve_policy_path
 from agentic_coder.pull_requests import apply_pull_request_changes, extract_proposed_file_changes
 from agentic_coder.queue.redis_queue import RedisTaskQueue
@@ -87,6 +92,8 @@ class CreateChatSessionRequest(BaseModel):
     title: str = Field(min_length=1, max_length=256)
     target_repository: str = Field(min_length=1, max_length=256)
     approval_issue_number: int | None = Field(default=None, ge=1)
+    model_provider: Literal["github", "ollama"] | None = None
+    model_name: str | None = Field(default=None, min_length=1, max_length=256)
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
@@ -102,6 +109,8 @@ class ExecuteChatSessionRequest(BaseModel):
     include_transcript_limit: int = Field(default=40, ge=1, le=200)
     force_new: bool = False
     approval_issue_number: int | None = Field(default=None, ge=1)
+    model_provider: Literal["github", "ollama"] | None = None
+    model_name: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 class TaskDecisionRequest(BaseModel):
@@ -155,6 +164,91 @@ def parse_positive_int(value: object) -> int | None:
     if parsed <= 0:
         return None
     return parsed
+
+
+def parse_chat_model_selection(metadata: dict[str, object] | None) -> dict[str, str] | None:
+    raw = (metadata or {}).get("model_selection")
+    if not isinstance(raw, dict):
+        return None
+
+    provider = str(raw.get("provider") or "").strip()
+    model = str(raw.get("model") or "").strip()
+    if not provider or not model:
+        return None
+    return {
+        "provider": provider,
+        "model": model,
+    }
+
+
+def validate_chat_model_selection(
+    *,
+    settings: object,
+    provider: str | None,
+    model: str | None,
+) -> dict[str, object] | None:
+    normalized_provider = str(provider or "").strip()
+    normalized_model = str(model or "").strip()
+    if not normalized_provider and not normalized_model:
+        return None
+    if not normalized_provider or not normalized_model:
+        raise HTTPException(
+            status_code=400,
+            detail="Both model_provider and model_name are required when selecting a model",
+        )
+
+    selected = find_chat_model_option(
+        settings,
+        provider=normalized_provider,
+        model=normalized_model,
+    )
+    if selected is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported chat model selection: {normalized_provider}:{normalized_model}",
+        )
+    return selected
+
+
+def serialize_chat_model_selection(
+    *,
+    settings: object,
+    metadata: dict[str, object] | None,
+    policy: object | None = None,
+) -> dict[str, object] | None:
+    selection = parse_chat_model_selection(metadata)
+    if selection is not None:
+        selected = find_chat_model_option(
+            settings,
+            provider=selection["provider"],
+            model=selection["model"],
+        )
+        if selected is not None:
+            return selected
+
+    if policy is None:
+        return None
+    return default_chat_model_selection(policy, settings)
+
+
+def serialize_chat_session_response(
+    chat_session: dict[str, object],
+    *,
+    settings: object,
+    policy: object,
+) -> dict[str, object]:
+    metadata = dict(chat_session.get("metadata") or {})
+    return {
+        **chat_session,
+        "approval_issue_number": parse_positive_int(metadata.get("approval_issue_number")),
+        "selected_model": serialize_chat_model_selection(
+            settings=settings,
+            metadata=metadata,
+            policy=policy,
+        ),
+        "created_at": chat_session["created_at"].isoformat(),
+        "updated_at": chat_session["updated_at"].isoformat(),
+    }
 
 
 def build_chat_transcript(
@@ -635,9 +729,25 @@ def dashboard_page() -> str:
 def chat_page(_admin: None = Depends(require_admin_token)) -> str:
     template_path = Path(__file__).with_name("chat.html")
     settings = get_settings()
+    _, policy = load_policy()
+    chat_config = {
+        "adminTokenRequired": bool(settings.api_admin_token),
+        "availableModels": available_chat_models(settings),
+        "defaultModelSelection": serialize_chat_model_selection(
+            settings=settings,
+            metadata=None,
+            policy=policy,
+        ),
+        "costLegend": {
+            "0x": "No premium Copilot token charge",
+            "1x": "Premium Copilot token charge",
+            "local": "Local runtime",
+            "custom": "Configured model not in the curated catalog",
+        },
+    }
     return template_path.read_text(encoding="utf-8").replace(
         "__AGENTIC_CHAT_CONFIG__",
-        json.dumps({"adminTokenRequired": bool(settings.api_admin_token)}),
+        json.dumps(chat_config),
     )
 
 
@@ -647,6 +757,7 @@ def create_chat_session(
     _admin: None = Depends(require_admin_token),
     x_operator: str | None = Header(default=None),
 ) -> dict[str, object]:
+    settings = get_settings()
     _, policy = load_policy()
     resolved_repository = expand_target_repository(policy, request_body.target_repository)
     if not is_target_repository_allowed(policy, resolved_repository):
@@ -659,6 +770,16 @@ def create_chat_session(
     metadata = dict(request_body.metadata)
     if request_body.approval_issue_number is not None:
         metadata["approval_issue_number"] = request_body.approval_issue_number
+    selected_model = validate_chat_model_selection(
+        settings=settings,
+        provider=request_body.model_provider,
+        model=request_body.model_name,
+    ) or default_chat_model_selection(policy, settings)
+    if selected_model is not None:
+        metadata["model_selection"] = {
+            "provider": selected_model["provider"],
+            "model": selected_model["model"],
+        }
 
     session_factory = create_session_factory()
     with session_factory() as session:
@@ -670,16 +791,12 @@ def create_chat_session(
             metadata=metadata,
         )
 
-    approval_issue_number = parse_positive_int(
-        (created.get("metadata") or {}).get("approval_issue_number")
-    )
     return {
-        "session": {
-            **created,
-            "approval_issue_number": approval_issue_number,
-            "created_at": created["created_at"].isoformat(),
-            "updated_at": created["updated_at"].isoformat(),
-        }
+        "session": serialize_chat_session_response(
+            created,
+            settings=settings,
+            policy=policy,
+        )
     }
 
 
@@ -688,20 +805,19 @@ def list_chat_sessions(
     limit: int = Query(default=50, ge=1, le=200),
     _admin: None = Depends(require_admin_token),
 ) -> dict[str, list[dict[str, object]]]:
+    settings = get_settings()
+    _, policy = load_policy()
     session_factory = create_session_factory()
     with session_factory() as session:
         repo = TaskRepository(session)
         sessions = repo.list_chat_sessions(limit=limit)
     return {
         "sessions": [
-            {
-                **item,
-                "approval_issue_number": parse_positive_int(
-                    (item.get("metadata") or {}).get("approval_issue_number")
-                ),
-                "created_at": item["created_at"].isoformat(),
-                "updated_at": item["updated_at"].isoformat(),
-            }
+            serialize_chat_session_response(
+                item,
+                settings=settings,
+                policy=policy,
+            )
             for item in sessions
         ]
     }
@@ -712,6 +828,8 @@ def get_chat_session(
     session_id: str,
     _admin: None = Depends(require_admin_token),
 ) -> dict[str, object]:
+    settings = get_settings()
+    _, policy = load_policy()
     session_factory = create_session_factory()
     with session_factory() as session:
         repo = TaskRepository(session)
@@ -719,14 +837,11 @@ def get_chat_session(
         if chat_session is None:
             raise HTTPException(status_code=404, detail="Chat session not found")
     return {
-        "session": {
-            **chat_session,
-            "approval_issue_number": parse_positive_int(
-                (chat_session.get("metadata") or {}).get("approval_issue_number")
-            ),
-            "created_at": chat_session["created_at"].isoformat(),
-            "updated_at": chat_session["updated_at"].isoformat(),
-        }
+        "session": serialize_chat_session_response(
+            chat_session,
+            settings=settings,
+            policy=policy,
+        )
     }
 
 
@@ -811,6 +926,7 @@ async def execute_chat_session(
     _admin: None = Depends(require_admin_token),
     x_operator: str | None = Header(default=None),
 ) -> dict[str, object]:
+    settings = get_settings()
     _, policy = load_policy()
     session_factory = create_session_factory()
 
@@ -853,6 +969,24 @@ async def execute_chat_session(
             raise HTTPException(status_code=400, detail="Chat session has no messages")
 
     metadata = dict(chat_session.get("metadata") or {})
+    explicit_selected_model = validate_chat_model_selection(
+        settings=settings,
+        provider=request_body.model_provider,
+        model=request_body.model_name,
+    )
+    selected_model = (
+        explicit_selected_model
+        or serialize_chat_model_selection(
+            settings=settings,
+            metadata=metadata,
+            policy=policy,
+        )
+    )
+    if selected_model is not None:
+        metadata["model_selection"] = {
+            "provider": selected_model["provider"],
+            "model": selected_model["model"],
+        }
     approval_issue_number = (
         request_body.approval_issue_number
         if request_body.approval_issue_number is not None
@@ -891,6 +1025,8 @@ async def execute_chat_session(
     session_factory = create_session_factory()
     with session_factory() as session:
         repo = TaskRepository(session)
+        if selected_model is not None:
+            repo.update_chat_session_metadata(session_id=session_id, metadata=metadata)
         task = repo.create(
             title=task_title,
             payload={
@@ -908,6 +1044,9 @@ async def execute_chat_session(
                 "requested_at": datetime.now(UTC).isoformat(),
                 "issue_number": approval_issue_number,
                 "approval_mode": "github_issue" if approval_issue_number else "none",
+                "model_provider": (selected_model or {}).get("provider"),
+                "model_name": (selected_model or {}).get("model"),
+                "model_cost_tier": (selected_model or {}).get("costTier"),
             },
         )
         repo.append_chat_message(
@@ -926,6 +1065,7 @@ async def execute_chat_session(
                 "target_repository": target_repository,
                 "force_new": request_body.force_new,
                 "approval_issue_number": approval_issue_number,
+                "selected_model": selected_model,
             },
         )
 
@@ -948,6 +1088,7 @@ async def execute_chat_session(
         "target_installation_id": target_installation_id,
         "source_installation_id": source_installation_id,
         "approval_issue_number": approval_issue_number,
+        "selected_model": selected_model,
     }
 
 

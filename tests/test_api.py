@@ -436,13 +436,27 @@ def test_chat_page_embeds_admin_token_requirement_flag(monkeypatch) -> None:
     monkeypatch.setattr(
         main,
         "get_settings",
-        lambda: type("_Settings", (), {"api_admin_token": ""})(),
+        lambda: type(
+            "_Settings",
+            (),
+            {
+                "api_admin_token": "",
+                "github_models_api_key": "ghp-test",
+                "github_models_chat_model": "Phi-4",
+                "ollama_chat_model": "llama3.1:8b",
+            },
+        )(),
     )
+    monkeypatch.setattr(main, "load_policy", lambda: (Path("agentic.yaml"), _ChatPolicy()))
 
     response = client.get("/chat")
 
     assert response.status_code == 200
     assert '"adminTokenRequired": false' in response.text
+    assert '"selectionKey": "github::Phi-4"' in response.text
+    assert '"costTier": "0x"' in response.text
+    assert '"selectionKey": "github::gpt-4.1"' in response.text
+    assert '"costTier": "1x"' in response.text
 
 
 class _ChatPolicy:
@@ -471,6 +485,7 @@ class _ChatExecutionRepo:
     created_payload: dict[str, object] | None = None
     appended_messages: list[dict[str, object]] = []
     session_metadata: dict[str, object] = {}
+    updated_metadata: dict[str, object] | None = None
 
     def __init__(self, session) -> None:  # noqa: ANN001
         self.session = session
@@ -541,6 +556,26 @@ class _ChatExecutionRepo:
         self.__class__.appended_messages.append(message)
         return message
 
+    def update_chat_session_metadata(
+        self,
+        *,
+        session_id: str,
+        metadata: dict[str, object],
+    ) -> dict[str, object] | None:
+        if session_id != "chat-1":
+            return None
+        self.__class__.updated_metadata = dict(metadata)
+        now = datetime.now(UTC)
+        return {
+            "session_id": "chat-1",
+            "title": "Enterprise request",
+            "target_repository": "acme/predictiv",
+            "created_by": "alex.ops",
+            "metadata": dict(metadata),
+            "created_at": now,
+            "updated_at": now,
+        }
+
 
 def test_execute_chat_session_requires_issue_number_when_gated(monkeypatch) -> None:
     from agentic_coder.api import main
@@ -548,9 +583,24 @@ def test_execute_chat_session_requires_issue_number_when_gated(monkeypatch) -> N
     _ChatExecutionRepo.created_payload = None
     _ChatExecutionRepo.appended_messages = []
     _ChatExecutionRepo.session_metadata = {}
+    _ChatExecutionRepo.updated_metadata = None
     monkeypatch.setattr(main, "TaskRepository", _ChatExecutionRepo)
     monkeypatch.setattr(main, "create_session_factory", lambda: _FakeSessionFactory())
     monkeypatch.setattr(main, "load_policy", lambda: (Path("agentic.yaml"), _ChatPolicy()))
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: type(
+            "_Settings",
+            (),
+            {
+                "api_admin_token": "",
+                "github_models_api_key": "ghp-test",
+                "github_models_chat_model": "Phi-4",
+                "ollama_chat_model": "llama3.1:8b",
+            },
+        )(),
+    )
 
     response = client.post("/chat/sessions/chat-1/execute", json={})
 
@@ -565,10 +615,25 @@ def test_execute_chat_session_routes_source_and_target_installations(monkeypatch
     _ChatExecutionRepo.created_payload = None
     _ChatExecutionRepo.appended_messages = []
     _ChatExecutionRepo.session_metadata = {"approval_issue_number": 77}
+    _ChatExecutionRepo.updated_metadata = None
 
     monkeypatch.setattr(main, "TaskRepository", _ChatExecutionRepo)
     monkeypatch.setattr(main, "create_session_factory", lambda: _FakeSessionFactory())
     monkeypatch.setattr(main, "load_policy", lambda: (Path("agentic.yaml"), _ChatPolicy()))
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: type(
+            "_Settings",
+            (),
+            {
+                "api_admin_token": "",
+                "github_models_api_key": "ghp-test",
+                "github_models_chat_model": "Phi-4",
+                "ollama_chat_model": "llama3.1:8b",
+            },
+        )(),
+    )
 
     async def _fake_installation_lookup(repository: str) -> int:
         if repository == "acme/control":
@@ -581,7 +646,10 @@ def test_execute_chat_session_routes_source_and_target_installations(monkeypatch
     fake_queue = _FakeQueue()
     monkeypatch.setattr(main.RedisTaskQueue, "from_settings", lambda: fake_queue)
 
-    response = client.post("/chat/sessions/chat-1/execute", json={})
+    response = client.post(
+        "/chat/sessions/chat-1/execute",
+        json={"model_provider": "github", "model_name": "gpt-4.1"},
+    )
 
     assert response.status_code == 200
     data = response.json()
@@ -590,6 +658,9 @@ def test_execute_chat_session_routes_source_and_target_installations(monkeypatch
     assert data["approval_issue_number"] == 77
     assert data["source_installation_id"] == 111
     assert data["target_installation_id"] == 222
+    assert data["selected_model"]["provider"] == "github"
+    assert data["selected_model"]["model"] == "gpt-4.1"
+    assert data["selected_model"]["costTier"] == "1x"
     assert fake_queue.enqueued == ["chat-task-1"]
 
     assert _ChatExecutionRepo.created_payload is not None
@@ -599,3 +670,10 @@ def test_execute_chat_session_routes_source_and_target_installations(monkeypatch
     assert payload["target_installation_id"] == 222
     assert payload["installation_id"] == 222
     assert payload["issue_number"] == 77
+    assert payload["model_provider"] == "github"
+    assert payload["model_name"] == "gpt-4.1"
+    assert payload["model_cost_tier"] == "1x"
+    assert _ChatExecutionRepo.updated_metadata == {
+        "approval_issue_number": 77,
+        "model_selection": {"provider": "github", "model": "gpt-4.1"},
+    }

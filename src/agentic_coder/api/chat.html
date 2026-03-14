@@ -240,6 +240,11 @@
         <input class="input mono" id="sessionApprovalIssue" placeholder="123" />
       </div>
       <div class="stack">
+        <label class="sub" for="sessionModel">Execution Model</label>
+        <select class="select" id="sessionModel"></select>
+        <div class="sub" id="modelLegend">Select the model and cost tier for this chat run.</div>
+      </div>
+      <div class="stack">
         <label class="sub" for="operatorId">Operator Identity</label>
         <input class="input mono" id="operatorId" placeholder="alex.ops" />
       </div>
@@ -341,6 +346,66 @@
       return state.operator;
     }
 
+    function providerLabel(provider) {
+      if (provider === "github") return "GitHub Models";
+      if (provider === "ollama") return "Ollama";
+      return provider || "unknown";
+    }
+
+    function modelOptionLabel(option) {
+      const label = `${providerLabel(option.provider)} - ${option.displayName} (${option.costTier})`;
+      return option.recommended ? `${label} - recommended` : label;
+    }
+
+    function findModelOption(selectionKey) {
+      const options = window.AGENTIC_CHAT_CONFIG?.availableModels || [];
+      return options.find((option) => option.selectionKey === selectionKey) || null;
+    }
+
+    function selectedModelOption() {
+      const select = document.getElementById("sessionModel");
+      return findModelOption(select.value);
+    }
+
+    function syncModelSelector(preferredSelectionKey = null) {
+      const select = document.getElementById("sessionModel");
+      const options = window.AGENTIC_CHAT_CONFIG?.availableModels || [];
+      const defaultKey =
+        preferredSelectionKey ||
+        window.AGENTIC_CHAT_CONFIG?.defaultModelSelection?.selectionKey ||
+        options[0]?.selectionKey ||
+        "";
+      select.innerHTML = options.length
+        ? options
+            .map((option) => `
+              <option value="${escapeHtml(option.selectionKey)}">
+                ${escapeHtml(modelOptionLabel(option))}
+              </option>
+            `)
+            .join("")
+        : '<option value="">No configured models</option>';
+      select.disabled = !options.length;
+      if (defaultKey) {
+        select.value = defaultKey;
+      }
+      if (!select.value && options.length) {
+        select.value = options[0].selectionKey;
+      }
+      updateModelLegend();
+    }
+
+    function updateModelLegend() {
+      const selected = selectedModelOption();
+      const legend = document.getElementById("modelLegend");
+      if (!selected) {
+        legend.textContent = "No configured models are currently available.";
+        return;
+      }
+      const costMeaning =
+        window.AGENTIC_CHAT_CONFIG?.costLegend?.[selected.costTier] || "Configured model tier";
+      legend.textContent = `${providerLabel(selected.provider)} / ${selected.displayName} - ${selected.costTier}: ${costMeaning}`;
+    }
+
     async function api(path, options = {}) {
       const token = ensureToken();
       const operator = ensureOperator();
@@ -387,6 +452,7 @@
               <div><strong>${escapeHtml(session.title)}</strong></div>
               <div class="mono sub">${escapeHtml(session.target_repository)}</div>
               <div class="sub">approval issue: ${escapeHtml(session.approval_issue_number || "none")}</div>
+              <div class="sub">model: ${escapeHtml(session.selected_model?.displayName || "default")} (${escapeHtml(session.selected_model?.costTier || "-")})</div>
               <div class="sub">updated ${new Date(session.updated_at).toLocaleString()}</div>
             </button>
           `;
@@ -414,7 +480,10 @@
       const approval = session.approval_issue_number
         ? ` • approval issue: #${session.approval_issue_number}`
         : "";
-      metaEl.textContent = `session: ${session.session_id} • repo: ${session.target_repository}${approval}`;
+      const model = session.selected_model
+        ? ` • model: ${session.selected_model.displayName} (${session.selected_model.costTier})`
+        : "";
+      metaEl.textContent = `session: ${session.session_id} • repo: ${session.target_repository}${approval}${model}`;
     }
 
     function renderMessages(messages) {
@@ -452,6 +521,7 @@
               <div class="mono">task ${escapeHtml(task.task_id)}</div>
               <div class="state-${escapeHtml(task.state)}">state: ${escapeHtml(task.state)}</div>
               <div>run: ${escapeHtml(task.run?.run_id || "n/a")} (${escapeHtml(task.run?.status || "n/a")})</div>
+              <div>model: ${escapeHtml(task.run?.model_used || "n/a")}</div>
               <div>pr: ${prLink}</div>
             </div>
           `;
@@ -481,6 +551,8 @@
       const session = activeSession();
       renderActiveHeader();
       if (!session) return;
+      document.getElementById("sessionApprovalIssue").value = session.approval_issue_number || "";
+      syncModelSelector(session.selected_model?.selectionKey || null);
       setStatus("loading active");
       const [messagesData, runsData] = await Promise.all([
         api(`/chat/sessions/${session.session_id}/messages?limit=500`),
@@ -504,6 +576,7 @@
         window.alert("Approval issue must be a positive integer.");
         return;
       }
+      const selectedModel = selectedModelOption();
       setStatus("creating session");
       await api("/chat/sessions", {
         method: "POST",
@@ -511,6 +584,8 @@
           title,
           target_repository: targetRepository,
           approval_issue_number: approvalIssue,
+          model_provider: selectedModel?.provider || null,
+          model_name: selectedModel?.model || null,
         }),
       });
       document.getElementById("sessionTitle").value = "";
@@ -553,10 +628,15 @@
         window.alert("Approval issue must be a positive integer.");
         return;
       }
+      const selectedModel = selectedModelOption();
       setStatus("executing");
       const result = await api(`/chat/sessions/${session.session_id}/execute`, {
         method: "POST",
-        body: JSON.stringify({ approval_issue_number: approvalIssue }),
+        body: JSON.stringify({
+          approval_issue_number: approvalIssue,
+          model_provider: selectedModel?.provider || null,
+          model_name: selectedModel?.model || null,
+        }),
       });
       setStatus(result.reused ? "reused active task" : "execution enqueued");
       await refreshSessions();
@@ -604,7 +684,12 @@
       ensureOperator();
     });
 
+    document.getElementById("sessionModel").addEventListener("change", () => {
+      updateModelLegend();
+    });
+
     ensureOperator();
+    syncModelSelector();
     refreshSessions()
       .then(refreshActiveSession)
       .catch((error) => {

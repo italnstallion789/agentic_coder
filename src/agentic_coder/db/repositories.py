@@ -313,6 +313,23 @@ class TaskRepository:
         sessions = self.session.scalars(stmt).all()
         return [self._chat_session_dict(item) for item in sessions]
 
+    def update_chat_session_metadata(
+        self,
+        *,
+        session_id: str,
+        metadata: dict[str, object],
+    ) -> dict[str, object] | None:
+        stmt = select(ChatSessionORM).where(ChatSessionORM.session_id == session_id)
+        session = self.session.scalar(stmt)
+        if session is None:
+            return None
+        session.metadata_json = metadata
+        session.updated_at = datetime.now(UTC)
+        self.session.add(session)
+        self.session.commit()
+        self.session.refresh(session)
+        return self._chat_session_dict(session)
+
     def append_chat_message(
         self,
         *,
