@@ -12,6 +12,7 @@ class TaskState(StrEnum):
     AWAITING_APPROVAL = "awaiting_approval"
     READY = "ready"
     RUNNING = "running"
+    DELEGATED = "delegated"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"

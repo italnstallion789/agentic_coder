@@ -480,12 +480,26 @@ class _ChatPolicy:
         fallback_provider = None
         embedding_provider = "github"
 
+    class chat:  # noqa: N801
+        execution_backend = "github_coding_agent"
+        auto_prepare = True
+
+
+class _LocalChatPolicy(_ChatPolicy):
+    class chat:  # noqa: N801
+        execution_backend = "local_pipeline"
+        auto_prepare = False
+
 
 class _ChatExecutionRepo:
     created_payload: dict[str, object] | None = None
     appended_messages: list[dict[str, object]] = []
     session_metadata: dict[str, object] = {}
     updated_metadata: dict[str, object] | None = None
+    run_events: list[tuple[str, dict[str, object]]] = []
+    state_updates: list[str] = []
+    run_metadata: dict[str, object] | None = None
+    completed_status: str | None = None
 
     def __init__(self, session) -> None:  # noqa: ANN001
         self.session = session
@@ -537,6 +551,35 @@ class _ChatExecutionRepo:
             updated_at=now,
         )
 
+    def create_run(self, task_id: str, worker_name: str) -> str:
+        _ = task_id, worker_name
+        return "run-1"
+
+    def update_state(self, task_id: str, state: TaskState, **kwargs) -> TaskRecord | None:  # noqa: ANN003
+        _ = kwargs
+        self.__class__.state_updates.append(state.value)
+        now = datetime.now(UTC)
+        return TaskRecord(
+            task_id=task_id,
+            title="Enterprise request",
+            payload=self.__class__.created_payload or {},
+            state=state,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def append_run_event(self, run_id: str, event_type: str, payload: dict[str, object]) -> None:
+        _ = run_id
+        self.__class__.run_events.append((event_type, dict(payload)))
+
+    def update_run_metadata(self, run_id: str, metadata: dict[str, object]) -> None:
+        _ = run_id
+        self.__class__.run_metadata = dict(metadata)
+
+    def complete_run(self, run_id: str, status: str) -> None:
+        _ = run_id
+        self.__class__.completed_status = status
+
     def append_chat_message(
         self,
         *,
@@ -577,13 +620,17 @@ class _ChatExecutionRepo:
         }
 
 
-def test_execute_chat_session_requires_issue_number_when_gated(monkeypatch) -> None:
+def test_prepare_chat_session_returns_clarification_questions(monkeypatch) -> None:
     from agentic_coder.api import main
 
     _ChatExecutionRepo.created_payload = None
     _ChatExecutionRepo.appended_messages = []
     _ChatExecutionRepo.session_metadata = {}
     _ChatExecutionRepo.updated_metadata = None
+    _ChatExecutionRepo.run_events = []
+    _ChatExecutionRepo.state_updates = []
+    _ChatExecutionRepo.run_metadata = None
+    _ChatExecutionRepo.completed_status = None
     monkeypatch.setattr(main, "TaskRepository", _ChatExecutionRepo)
     monkeypatch.setattr(main, "create_session_factory", lambda: _FakeSessionFactory())
     monkeypatch.setattr(main, "load_policy", lambda: (Path("agentic.yaml"), _ChatPolicy()))
@@ -595,31 +642,261 @@ def test_execute_chat_session_requires_issue_number_when_gated(monkeypatch) -> N
             (),
             {
                 "api_admin_token": "",
+                "github_agent_user_token": "ghu-test",
+                "github_app_id": "1",
+                "github_private_key": "private-key",
+                "github_api_base_url": "https://api.github.com",
+                "model_request_timeout_seconds": 40.0,
+                "github_models_base_url": "https://models.inference.ai.azure.com",
+                "ollama_base_url": "http://ollama:11434",
                 "github_models_api_key": "ghp-test",
                 "github_models_chat_model": "Phi-4",
                 "ollama_chat_model": "llama3.1:8b",
             },
         )(),
     )
+    monkeypatch.setattr(
+        main.ChatManagerAgent,
+        "prepare_dispatch",
+        lambda self, **kwargs: main.DispatchPlan(  # noqa: ARG005
+            ready=False,
+            summary="Need decisions on rollout scope.",
+            issue_title="Improve predictiv",
+            issue_body_markdown="",
+            custom_instructions="",
+            clarification_questions=[
+                "Should this ship as one PR or staged work?",
+                "Can backend behavior change for existing users?",
+            ],
+        ),
+    )
+
+    response = client.post(
+        "/chat/sessions/chat-1/prepare",
+        json={"base_branch": "develop", "custom_agent": "frontend-designer"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ready"] is False
+    assert len(data["clarification_questions"]) == 2
+    assert data["base_branch"] == "develop"
+    assert data["custom_agent"] == "frontend-designer"
+    assert _ChatExecutionRepo.updated_metadata is not None
+    assert _ChatExecutionRepo.updated_metadata["base_branch"] == "develop"
+    assert _ChatExecutionRepo.updated_metadata["custom_agent"] == "frontend-designer"
+    assert _ChatExecutionRepo.appended_messages[-1]["role"] == "assistant"
+
+
+def test_execute_chat_session_dispatches_to_github_agent(monkeypatch) -> None:
+    from agentic_coder.api import main
+
+    _ChatExecutionRepo.created_payload = None
+    _ChatExecutionRepo.appended_messages = []
+    _ChatExecutionRepo.session_metadata = {"base_branch": "develop"}
+    _ChatExecutionRepo.updated_metadata = None
+    _ChatExecutionRepo.run_events = []
+    _ChatExecutionRepo.state_updates = []
+    _ChatExecutionRepo.run_metadata = None
+    _ChatExecutionRepo.completed_status = None
+
+    monkeypatch.setattr(main, "TaskRepository", _ChatExecutionRepo)
+    monkeypatch.setattr(main, "create_session_factory", lambda: _FakeSessionFactory())
+    monkeypatch.setattr(main, "load_policy", lambda: (Path("agentic.yaml"), _ChatPolicy()))
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: type(
+            "_Settings",
+            (),
+            {
+                "api_admin_token": "",
+                "github_agent_user_token": "ghu-test",
+                "github_app_id": "1",
+                "github_private_key": "private-key",
+                "github_api_base_url": "https://api.github.com",
+                "model_request_timeout_seconds": 40.0,
+                "github_models_base_url": "https://models.inference.ai.azure.com",
+                "ollama_base_url": "http://ollama:11434",
+                "github_models_api_key": "ghp-test",
+                "github_models_chat_model": "Phi-4",
+                "ollama_chat_model": "llama3.1:8b",
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        main.ChatManagerAgent,
+        "prepare_dispatch",
+        lambda self, **kwargs: main.DispatchPlan(  # noqa: ARG005
+            ready=True,
+            summary="Dispatch ready for predictiv onboarding improvements.",
+            issue_title="Improve onboarding flow",
+            issue_body_markdown="## Objective\nShip onboarding improvements.",
+            custom_instructions="Keep the first PR scoped to onboarding flow changes.",
+            clarification_questions=[],
+        ),
+    )
+
+    class _DispatchGithub:
+        calls: list[dict[str, object]] = []
+
+        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            _ = args, kwargs
+
+        async def create_issue_with_coding_agent(
+            self,
+            repository: str,
+            user_token: str,
+            *,
+            title: str,
+            body: str,
+            base_branch: str,
+            labels: list[str] | None = None,
+            custom_instructions: str = "",
+            custom_agent: str | None = None,
+            model: str | None = None,
+        ) -> dict[str, object]:
+            self.__class__.calls.append(
+                {
+                    "repository": repository,
+                    "user_token": user_token,
+                    "title": title,
+                    "body": body,
+                    "base_branch": base_branch,
+                    "labels": labels or [],
+                    "custom_instructions": custom_instructions,
+                    "custom_agent": custom_agent,
+                    "model": model,
+                }
+            )
+            return {
+                "number": 77,
+                "html_url": "https://github.com/acme/predictiv/issues/77",
+            }
+
+    monkeypatch.setattr(main, "GitHubAppService", _DispatchGithub)
+
+    response = client.post(
+        "/chat/sessions/chat-1/execute",
+        json={
+            "model_provider": "github",
+            "model_name": "gpt-4.1",
+            "base_branch": "develop",
+            "custom_agent": "frontend-designer",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["dispatched"] is True
+    assert data["task_id"] == "chat-task-1"
+    assert data["run_id"] == "run-1"
+    assert data["state"] == "delegated"
+    assert data["issue"]["number"] == 77
+    assert data["selected_model"]["provider"] == "github"
+    assert data["selected_model"]["model"] == "gpt-4.1"
+    assert data["selected_model"]["costTier"] == "1x"
+    assert data["custom_agent"] == "frontend-designer"
+
+    assert _ChatExecutionRepo.created_payload is not None
+    payload = _ChatExecutionRepo.created_payload
+    assert payload["source_repository"] == "acme/control"
+    assert payload["dispatch_backend"] == "github_coding_agent"
+    assert payload["dispatch_issue_number"] == 77
+    assert payload["dispatch_issue_url"] == "https://github.com/acme/predictiv/issues/77"
+    assert payload["dispatch_base_branch"] == "develop"
+    assert payload["dispatch_model"] == "gpt-4.1"
+    assert payload["dispatch_model_provider"] == "github"
+    assert payload["dispatch_model_cost_tier"] == "1x"
+    assert _ChatExecutionRepo.updated_metadata == {
+        "base_branch": "develop",
+        "custom_agent": "frontend-designer",
+        "model_selection": {"provider": "github", "model": "gpt-4.1"},
+        "last_dispatch_plan": {
+            "ready": True,
+            "summary": "Dispatch ready for predictiv onboarding improvements.",
+            "issue_title": "Improve onboarding flow",
+            "custom_instructions": "Keep the first PR scoped to onboarding flow changes.",
+            "clarification_questions": [],
+            "prepared_at": _ChatExecutionRepo.updated_metadata["last_dispatch_plan"]["prepared_at"],
+        },
+    }
+    assert _ChatExecutionRepo.state_updates[-1] == "delegated"
+    assert _ChatExecutionRepo.completed_status == "succeeded"
+    assert any(event[0] == "github_agent_dispatched" for event in _ChatExecutionRepo.run_events)
+    assert _DispatchGithub.calls[0]["custom_agent"] == "frontend-designer"
+    assert _DispatchGithub.calls[0]["model"] == "gpt-4.1"
+
+
+def test_execute_chat_session_returns_clarification_when_not_ready(monkeypatch) -> None:
+    from agentic_coder.api import main
+
+    _ChatExecutionRepo.created_payload = None
+    _ChatExecutionRepo.appended_messages = []
+    _ChatExecutionRepo.session_metadata = {}
+    _ChatExecutionRepo.updated_metadata = None
+    _ChatExecutionRepo.run_events = []
+    _ChatExecutionRepo.state_updates = []
+    _ChatExecutionRepo.run_metadata = None
+    _ChatExecutionRepo.completed_status = None
+    monkeypatch.setattr(main, "TaskRepository", _ChatExecutionRepo)
+    monkeypatch.setattr(main, "create_session_factory", lambda: _FakeSessionFactory())
+    monkeypatch.setattr(main, "load_policy", lambda: (Path("agentic.yaml"), _ChatPolicy()))
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: type(
+            "_Settings",
+            (),
+            {
+                "api_admin_token": "",
+                "github_agent_user_token": "ghu-test",
+                "github_app_id": "1",
+                "github_private_key": "private-key",
+                "github_api_base_url": "https://api.github.com",
+                "model_request_timeout_seconds": 40.0,
+                "github_models_base_url": "https://models.inference.ai.azure.com",
+                "ollama_base_url": "http://ollama:11434",
+                "github_models_api_key": "ghp-test",
+                "github_models_chat_model": "Phi-4",
+                "ollama_chat_model": "llama3.1:8b",
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        main.ChatManagerAgent,
+        "prepare_dispatch",
+        lambda self, **kwargs: main.DispatchPlan(  # noqa: ARG005
+            ready=False,
+            summary="Need one more decision.",
+            issue_title="Improve predictiv",
+            issue_body_markdown="",
+            custom_instructions="",
+            clarification_questions=["Should this include backend changes?"],
+        ),
+    )
 
     response = client.post("/chat/sessions/chat-1/execute", json={})
 
-    assert response.status_code == 400
+    assert response.status_code == 200
     data = response.json()
-    assert "approval_issue_number" in str(data["detail"])
+    assert data["dispatched"] is False
+    assert data["clarification_required"] is True
+    assert data["clarification_questions"] == ["Should this include backend changes?"]
+    assert _ChatExecutionRepo.created_payload is None
+    assert _ChatExecutionRepo.appended_messages[-1]["role"] == "assistant"
 
 
-def test_execute_chat_session_routes_source_and_target_installations(monkeypatch) -> None:
+def test_execute_chat_session_local_pipeline_fallback(monkeypatch) -> None:
     from agentic_coder.api import main
 
     _ChatExecutionRepo.created_payload = None
     _ChatExecutionRepo.appended_messages = []
     _ChatExecutionRepo.session_metadata = {"approval_issue_number": 77}
     _ChatExecutionRepo.updated_metadata = None
-
     monkeypatch.setattr(main, "TaskRepository", _ChatExecutionRepo)
     monkeypatch.setattr(main, "create_session_factory", lambda: _FakeSessionFactory())
-    monkeypatch.setattr(main, "load_policy", lambda: (Path("agentic.yaml"), _ChatPolicy()))
+    monkeypatch.setattr(main, "load_policy", lambda: (Path("agentic.yaml"), _LocalChatPolicy()))
     monkeypatch.setattr(
         main,
         "get_settings",
@@ -658,22 +935,3 @@ def test_execute_chat_session_routes_source_and_target_installations(monkeypatch
     assert data["approval_issue_number"] == 77
     assert data["source_installation_id"] == 111
     assert data["target_installation_id"] == 222
-    assert data["selected_model"]["provider"] == "github"
-    assert data["selected_model"]["model"] == "gpt-4.1"
-    assert data["selected_model"]["costTier"] == "1x"
-    assert fake_queue.enqueued == ["chat-task-1"]
-
-    assert _ChatExecutionRepo.created_payload is not None
-    payload = _ChatExecutionRepo.created_payload
-    assert payload["source_repository"] == "acme/control"
-    assert payload["source_installation_id"] == 111
-    assert payload["target_installation_id"] == 222
-    assert payload["installation_id"] == 222
-    assert payload["issue_number"] == 77
-    assert payload["model_provider"] == "github"
-    assert payload["model_name"] == "gpt-4.1"
-    assert payload["model_cost_tier"] == "1x"
-    assert _ChatExecutionRepo.updated_metadata == {
-        "approval_issue_number": 77,
-        "model_selection": {"provider": "github", "model": "gpt-4.1"},
-    }

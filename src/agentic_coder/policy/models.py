@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field, model_validator
 
 AutonomyMode = Literal["gated", "autonomous"]
 TriggerMode = Literal["webhook", "polling", "hybrid"]
+ChatExecutionBackend = Literal["github_coding_agent", "local_pipeline"]
 
 
 class SystemPolicy(BaseModel):
@@ -57,6 +58,11 @@ class BudgetPolicy(BaseModel):
     max_parallel_candidates: int = 1
 
 
+class ChatPolicy(BaseModel):
+    execution_backend: ChatExecutionBackend = "github_coding_agent"
+    auto_prepare: bool = True
+
+
 class AgenticPolicy(BaseModel):
     version: int = 1
     system: SystemPolicy = Field(default_factory=SystemPolicy)
@@ -66,6 +72,7 @@ class AgenticPolicy(BaseModel):
     trigger: TriggerPolicy = Field(default_factory=TriggerPolicy)
     knowledge_graph: KnowledgeGraphPolicy = Field(default_factory=KnowledgeGraphPolicy)
     budgets: BudgetPolicy = Field(default_factory=BudgetPolicy)
+    chat: ChatPolicy = Field(default_factory=ChatPolicy)
 
     @model_validator(mode="after")
     def validate_autonomy_mode(self) -> "AgenticPolicy":

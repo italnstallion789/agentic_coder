@@ -83,7 +83,7 @@
 
     .grid {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 10px;
       margin-bottom: 12px;
     }
@@ -143,6 +143,12 @@
       color: var(--warn);
     }
 
+    .state-delegated {
+      background: #edf3ff;
+      border-color: #cadeff;
+      color: var(--accent);
+    }
+
     .state-succeeded {
       background: #e9f8ef;
       border-color: #c7ead3;
@@ -192,6 +198,7 @@
       <select id="stateFilter">
         <option value="">All states</option>
         <option value="awaiting_approval">Awaiting approval</option>
+        <option value="delegated">Delegated</option>
         <option value="ready">Ready</option>
         <option value="succeeded">Succeeded</option>
         <option value="failed">Failed</option>
@@ -232,6 +239,10 @@
       <div class="card">
         <div class="label">Embedding Provider</div>
         <div class="value" id="embeddingProvider">-</div>
+      </div>
+      <div class="card">
+        <div class="label">Chat Backend</div>
+        <div class="value" id="chatBackend">-</div>
       </div>
     </div>
 
@@ -325,6 +336,8 @@
         data.model?.fallback_provider || "-";
       document.getElementById("embeddingProvider").textContent =
         data.model?.embedding_provider || "-";
+      document.getElementById("chatBackend").textContent =
+        data.chat_execution_backend || "-";
 
       const search = (document.getElementById("searchInput").value || "").toLowerCase();
       const stateFilter = document.getElementById("stateFilter").value || "";
@@ -355,6 +368,7 @@
           const req = item.request || {};
           const run = item.run || {};
           const pr = item.pull_request || null;
+          const dispatch = item.dispatch || null;
           const issueNumber = req.issue_number ? `#${req.issue_number}` : "-";
           const body = esc((req.body || "").slice(0, 160));
           const taskId = esc(item.task_id);
@@ -365,6 +379,10 @@
             ? `<a href="${esc(pr.url)}" target="_blank" ` +
               `rel="noreferrer">PR #${esc(pr.number)}</a>`
             : '<span class="muted">None</span>';
+          const dispatchHtml = dispatch?.issue_url
+            ? `<div><a href="${esc(dispatch.issue_url)}" target="_blank" rel="noreferrer">Issue #${esc(dispatch.issue_number)}</a></div>
+               <div class="muted">${esc(dispatch.repository || "")}</div>`
+            : '<div class="muted">No delegated issue</div>';
           const actions = item.state === "awaiting_approval"
             ? `<div class="actions">
                 <button class="btn warn" onclick="approveTask('${taskId}')">Approve</button>
@@ -393,6 +411,7 @@
               <div class="muted">${esc(run.status || "-")}</div>
               <div class="muted">${esc(run.pr_draft_title || "")}</div>
               <div class="muted">model: ${esc(run.model_used || data.model?.primary_provider || "-")}</div>
+              ${dispatchHtml}
             </td>
             <td>${prHtml}</td>
             <td>${actions}</td>

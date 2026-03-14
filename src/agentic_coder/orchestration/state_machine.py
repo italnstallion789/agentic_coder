@@ -10,10 +10,12 @@ TRANSITIONS: dict[TaskState, set[TaskState]] = {
     TaskState.RUNNING: {
         TaskState.AWAITING_APPROVAL,
         TaskState.READY,
+        TaskState.DELEGATED,
         TaskState.SUCCEEDED,
         TaskState.FAILED,
         TaskState.CANCELLED,
     },
+    TaskState.DELEGATED: set(),
     TaskState.SUCCEEDED: set(),
     TaskState.FAILED: set(),
     TaskState.CANCELLED: set(),

@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     github_private_key: str = ""
     github_private_key_path: Path | None = None
     github_api_base_url: str = "https://api.github.com"
+    github_agent_user_token: str = ""
     github_models_api_key: str = ""
     github_models_base_url: str = "https://models.inference.ai.azure.com"
     github_models_chat_model: str = "gpt-4.1-mini"

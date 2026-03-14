@@ -24,6 +24,11 @@ class WebhookVerifier:
 
 
 class GitHubAppService:
+    CODING_AGENT_ASSIGNEE = "copilot-swe-agent[bot]"
+    CODING_AGENT_FEATURES = (
+        "issues_copilot_assignment_api_support,coding_agent_model_selection"
+    )
+
     def __init__(
         self,
         app_id: str,
@@ -290,6 +295,45 @@ class GitHubAppService:
         response.raise_for_status()
         return response.json()
 
+    async def create_issue_with_coding_agent(
+        self,
+        repository: str,
+        user_token: str,
+        *,
+        title: str,
+        body: str,
+        base_branch: str,
+        labels: list[str] | None = None,
+        custom_instructions: str = "",
+        custom_agent: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        url = f"{self.api_base_url}/repos/{repository}/issues"
+        headers = self._user_headers(user_token)
+        payload: dict[str, Any] = {
+            "title": title,
+            "body": body,
+            "assignees": [self.CODING_AGENT_ASSIGNEE],
+            "agentAssignment": {
+                "target_repo": repository,
+                "base_branch": base_branch,
+            },
+        }
+        if labels:
+            payload["labels"] = labels
+        if custom_instructions.strip():
+            payload["agentAssignment"]["custom_instructions"] = custom_instructions.strip()
+        if custom_agent and custom_agent.strip():
+            payload["agentAssignment"]["custom_agent"] = custom_agent.strip()
+        if model and model.strip():
+            payload["agentAssignment"]["model"] = model.strip()
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, headers=headers, json=payload)
+
+        response.raise_for_status()
+        return response.json()
+
     async def add_issue_labels(
         self,
         repository: str,
@@ -380,4 +424,13 @@ class GitHubAppService:
             "Authorization": f"Bearer {installation_token}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
+        }
+
+    @classmethod
+    def _user_headers(cls, user_token: str) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {user_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "GraphQL-Features": cls.CODING_AGENT_FEATURES,
         }
