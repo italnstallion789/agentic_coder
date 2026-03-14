@@ -17,9 +17,10 @@ The current implementation includes:
 
 The pipeline currently plans, retrieves context, reviews, generates validation commands, and drafts PR metadata.
 
-- The current PR flow is artifact-backed: it creates a target-repo branch, commits `.agentic/runs/<run_id>.md`, and opens a draft PR
-- It does not yet apply generated source-code edits into the target repository
-- That limitation should be kept in mind when operating the system or evaluating run results
+- The current PR flow always creates a target-repo branch, commits `.agentic/runs/<run_id>.md`, and opens a draft PR
+- When the coding proposal includes concrete file contents, those files are written into the PR branch before the PR opens
+- If the proposal does not include concrete file contents, the PR remains artifact-only
+- Patch application is therefore present, but it is still limited by proposal quality and the current context window
 
 ## Development workflow
 
@@ -89,6 +90,7 @@ The API supports creating a draft PR from an existing run timeline:
 - body: `{"installation_id": <int>, "branch_name": "agentic/<run>", "draft": true}`
 
 This flow uses GitHub App installation token exchange, resolves the repository default branch, creates the head branch, commits the run artifact, and opens a draft PR using run-generated PR draft metadata.
+When the run includes concrete `file_changes`, those files are committed to the branch before the run artifact is written.
 
 ### Control repo vs target repos
 
@@ -211,7 +213,7 @@ A host Python environment is optional and only needed if container-based develop
 
 ## Recommended next investments
 
-- Add real patch application so target-repo PRs contain source edits instead of only run artifacts
+- Improve patch fidelity so the coding agent can reliably produce complete file updates for more than the current narrow context window
 - Execute generated validation commands in the sandbox executor before PR open
 - Reduce worker idle-log noise or make polling log verbosity configurable
 - Strengthen retrieval and knowledge-graph quality beyond the current `.py`-centric heuristics

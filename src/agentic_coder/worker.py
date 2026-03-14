@@ -14,6 +14,7 @@ from agentic_coder.github_app.service import GitHubAppService
 from agentic_coder.logging import configure_logging
 from agentic_coder.orchestration.pipeline import TaskPipeline
 from agentic_coder.policy.loader import PolicyLoader
+from agentic_coder.pull_requests import apply_pull_request_changes, extract_proposed_file_changes
 from agentic_coder.queue.redis_queue import RedisTaskQueue
 
 configure_logging()
@@ -171,6 +172,10 @@ def process_task(
             {
                 "summary": result.proposal.summary,
                 "target_files": result.proposal.target_files,
+                "file_changes": [
+                    {"path": change.path, "content": change.content}
+                    for change in result.proposal.file_changes
+                ],
             },
         )
         repo.append_run_event(
@@ -422,6 +427,7 @@ async def create_pr_for_ready_task_async(
     pr_title = str((run.get("metadata") or {}).get("pr_title") or task.title)
     pr_body = str(pr_event["payload"].get("body") or "Automated change set")
     branch_name = f"agentic/{run_id[:8]}"
+    file_changes = extract_proposed_file_changes(events)
 
     settings = get_settings()
     if not settings.github_app_id or not settings.github_private_key:
@@ -439,23 +445,17 @@ async def create_pr_for_ready_task_async(
         base_sha = await github.get_branch_head_sha(repository, base_branch, token)
         await github.create_branch(repository, branch_name, base_sha, token)
 
-        artifact_path = f".agentic/runs/{run_id}.md"
-        artifact_content = (
-            f"# Run {run_id}\n\n"
-            f"- Repository: {repository}\n"
-            f"- Task ID: {task.task_id}\n"
-            "- PR triggered by Agentic workflow\n"
-            f"- Requested by: {requested_by}\n\n"
-            f"## PR Title\n{pr_title}\n\n"
-            f"## PR Body\n{pr_body}\n"
-        )
-        commit_result = await github.upsert_file(
-            repository,
-            token,
+        applied = await apply_pull_request_changes(
+            github=github,
+            repository=repository,
+            installation_token=token,
             branch=branch_name,
-            path=artifact_path,
-            message=f"agentic: add run artifact {run_id}",
-            content=artifact_content,
+            run_id=run_id,
+            task_id=task.task_id,
+            requested_by=requested_by,
+            pr_title=pr_title,
+            pr_body=pr_body,
+            file_changes=file_changes,
         )
         pull_request = await github.create_pull_request(
             repository,
@@ -470,7 +470,9 @@ async def create_pr_for_ready_task_async(
             "pull_request": pull_request,
             "branch_name": branch_name,
             "base_branch": base_branch,
-            "commit_sha": ((commit_result.get("commit") or {}).get("sha") or ""),
+            "artifact_path": applied.artifact_path,
+            "artifact_commit_sha": applied.artifact_commit_sha or "",
+            "changed_files": applied.changed_files,
         }
 
     repo.update_state(
@@ -510,7 +512,9 @@ async def create_pr_for_ready_task_async(
             "base_branch": result.get("base_branch"),
             "pull_request_number": pull_request.get("number"),
             "pull_request_url": pull_request.get("html_url"),
-            "commit_sha": result.get("commit_sha"),
+            "artifact_path": result.get("artifact_path"),
+            "artifact_commit_sha": result.get("artifact_commit_sha"),
+            "changed_files": result.get("changed_files"),
         },
     )
     repo.update_state(

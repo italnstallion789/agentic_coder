@@ -62,13 +62,14 @@ Chat sessions are persisted in PostgreSQL and linked back to any tasks they crea
 
 ## What the current PR contains
 
-The current implementation does not write model-generated source edits into the target repository.
+The current implementation always writes a run artifact and may also write model-generated source edits into the target repository.
 
 - The branch contains a run artifact at `.agentic/runs/<run_id>.md`
+- If the coding proposal includes concrete `file_changes`, those files are committed into the PR branch before the artifact
 - The draft PR title/body come from the pipeline output
 - The proposal, target files, review result, and test plan are visible through task/run metadata
 
-This means the system is currently strongest as a controlled planning, approval, and orchestration layer rather than a full patch-writing engine.
+This means the system can now open real file-changing PRs, but patch quality still depends on the coding proposal producing complete file contents from the retrieved context.
 
 ## Operational endpoints
 

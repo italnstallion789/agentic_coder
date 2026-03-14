@@ -1,9 +1,10 @@
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from agentic_coder.agents.planner import PlanResult
 from agentic_coder.models.providers import ChatMessage, ModelProvider
+from agentic_coder.pull_requests import ProposedFileChange
 from agentic_coder.retrieval.service import RetrievalDocument
 
 
@@ -11,6 +12,7 @@ from agentic_coder.retrieval.service import RetrievalDocument
 class PatchProposal:
     summary: str
     target_files: list[str]
+    file_changes: list[ProposedFileChange] = field(default_factory=list)
 
 
 class CodingAgent:
@@ -41,7 +43,7 @@ class CodingAgent:
             f"Objective: {plan.objective}. "
             f"Prepared implementation path across {len(target_files)} candidate files."
         )
-        return PatchProposal(summary=summary, target_files=target_files)
+        return PatchProposal(summary=summary, target_files=target_files, file_changes=[])
 
     def _propose_with_model(
         self,
@@ -57,11 +59,16 @@ class CodingAgent:
         steps_text = "\n".join(f"  {i + 1}. {step}" for i, step in enumerate(plan.steps))
         prompt = (
             "You are an expert software engineer. Given a task plan and relevant repository files, "
-            "identify which files need to be changed and describe the implementation approach.\n"
+            "identify which files need to be changed and, when safe, provide the full updated "
+            "contents for those files.\n"
             "Only reference file paths that exist in the provided file list.\n"
             "Return ONLY compact JSON with keys:\n"
             "  - summary (string): concise description of what changes will be made\n"
-            "  - target_files (array of strings): relative file paths that need modification\n\n"
+            "  - target_files (array of strings): relative file paths that need modification\n"
+            "  - file_changes (array of objects): optional full-file updates with keys path and "
+            "content\n"
+            "If you cannot safely rewrite a file from the provided context, omit it from "
+            "file_changes.\n\n"
             f"Repository: {repository or 'unknown'}\n"
             f"Objective: {plan.objective}\n"
             f"Steps:\n{steps_text}\n\n"
@@ -79,4 +86,16 @@ class CodingAgent:
         summary = str(parsed.get("summary") or plan.objective)
         files = parsed.get("target_files") or []
         target_files = [str(f) for f in files if str(f).strip()]
-        return PatchProposal(summary=summary, target_files=target_files)
+        file_changes = [
+            ProposedFileChange(
+                path=str(item.get("path") or "").strip(),
+                content=str(item.get("content") or ""),
+            )
+            for item in (parsed.get("file_changes") or [])
+            if isinstance(item, dict) and str(item.get("path") or "").strip()
+        ]
+        return PatchProposal(
+            summary=summary,
+            target_files=target_files,
+            file_changes=file_changes,
+        )

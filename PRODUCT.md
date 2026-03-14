@@ -6,7 +6,7 @@ Agentic Coder is a local-first, GitHub-native autonomous AI development platform
 
 The platform is designed around a human-in-the-loop approval model: in `gated` mode (default), every proposed change waits for explicit sign-off via a GitHub comment before a PR is opened. In `autonomous` mode, the agent acts end-to-end without pausing.
 
-Current implementation note: the PR branch currently contains a run artifact (`.agentic/runs/<run_id>.md`) plus PR draft metadata. The pipeline does not yet write source-code edits into the target repository.
+Current implementation note: the PR branch always contains a run artifact (`.agentic/runs/<run_id>.md`). When the coding proposal includes concrete file contents, those files are also written into the target-repository branch before the PR opens. If no concrete file contents are available, the PR remains artifact-only.
 
 ---
 
@@ -53,7 +53,7 @@ TaskPipeline
 [autonomous mode] Proceed immediately
       │
       ▼
-Create branch → commit artifact → open draft PR in target repo
+Create branch → commit proposed file changes + artifact → open draft PR in target repo
       │
       ▼
 Post status update comment on source issue
@@ -63,8 +63,8 @@ Post status update comment on source issue
 
 - The pipeline generates a `PatchProposal`, review result, security result, test plan, and PR draft
 - Approval and status comments are posted back to the control-repository issue when issue context is present
-- Target-repository PRs are currently artifact-backed and are intended as a controlled handoff / approval surface
-- Direct file patch application in the target repository is not implemented yet
+- Target-repository PRs always contain a run artifact and may also contain model-proposed file changes
+- Direct patch application currently depends on the coding agent returning full file contents for files already present in retrieved context
 
 ---
 
@@ -126,8 +126,8 @@ All agents receive the same `ModelProvider` instance resolved at pipeline init. 
 
 ### CodingAgent
 - **Input:** `PlanResult` + context documents + repository name
-- **Output:** `PatchProposal` — summary of changes + list of target file paths
-- **Model prompt:** produces JSON `{summary, target_files}` constrained to files present in context
+- **Output:** `PatchProposal` — summary of changes + list of target file paths + optional full-file updates
+- **Model prompt:** produces JSON `{summary, target_files, file_changes}` constrained to files present in context
 
 ### ReviewerAgent
 - **Input:** `PatchProposal`
@@ -312,7 +312,7 @@ In `gated` autonomy mode, chat execution requires a GitHub approval issue number
 - Set `approval_issue_number` on session create, or pass it during execute
 - Worker posts approval-request/status comments to the control repository issue
 - `/approve` and `/reject` comments continue to drive transitions and PR creation
-- The resulting PR is still artifact-backed until direct patch application is implemented
+- The resulting PR always contains a run artifact and may also contain model-proposed file updates when available
 
 ### Installation Context Separation
 
