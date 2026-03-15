@@ -11,8 +11,8 @@ system:
     italnstallion789/predictiv: /repos/predictiv
   default_target_base_branch: develop
   target_base_branches:
-    italnstallion789/predictiv: master
-    predictiv: master
+    italnstallion789/predictiv: develop
+    predictiv: develop
 autonomy:
   mode: gated
   allowed_actions:
